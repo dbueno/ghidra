@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# CLI driver for the Ghidra GUI bridge javaagent.
+#
+# The bridge runs an HTTP server inside Ghidra's JVM on 127.0.0.1:$GUI_BRIDGE_PORT
+# (default 18217). This script wraps the endpoints so an agent can observe and
+# drive the live Swing GUI from the shell.
+#
+# Observe (no OS permissions required):
+#   ghidra-gui health                       # is the bridge up? is AWT showing?
+#   ghidra-gui windows                      # list top-level windows
+#   ghidra-gui tree [WINDOW_INDEX]          # Swing component tree (JSON)
+#   ghidra-gui find <text> [class]          # find components by text/class
+#   ghidra-gui shot [out.png] [id=N|window=N]   # render a window/component to PNG
+#
+# Act in-JVM (no OS permissions required):
+#   ghidra-gui invoke id=<N>                # Swing doClick / dispatch click
+#   ghidra-gui invoke text="OK"            # click first component with that text
+#   ghidra-gui settext id=<N> "hello"      # set a text field's contents
+#   ghidra-gui focus id=<N>
+#
+# Act via Robot (realistic OS input; needs macOS Accessibility/Screen Recording):
+#   ghidra-gui click id=<N>                # move+click component center
+#   ghidra-gui click x=400 y=300
+#   ghidra-gui typetext "main"             # type a string
+#   ghidra-gui press "ctrl shift E"        # key combo
+#
+set -euo pipefail
+PORT="${GUI_BRIDGE_PORT:-18217}"
+BASE="http://127.0.0.1:${PORT}"
+
+# jq is optional; pretty-print when available, raw otherwise.
+pp() { if command -v jq >/dev/null 2>&1; then jq .; else cat; fi; }
+get() { curl -fsS "$BASE$1"; }
+post() { curl -fsS -X POST "$BASE$1" -H 'Content-Type: application/json' -d "$2"; }
+
+# Turn key=value CLI args into a JSON object. Bare values map to numbers when
+# numeric, otherwise strings. e.g.  id=12  -> {"id":12} ;  text="OK" -> {"text":"OK"}
+kvjson() {
+  local json="{" first=1
+  for arg in "$@"; do
+    local k="${arg%%=*}" v="${arg#*=}"
+    [[ "$arg" != *=* ]] && continue
+    [[ $first -eq 0 ]] && json+=","
+    first=0
+    if [[ "$v" =~ ^-?[0-9]+$ ]]; then
+      json+="\"$k\":$v"
+    else
+      v="${v//\\/\\\\}"; v="${v//\"/\\\"}"
+      json+="\"$k\":\"$v\""
+    fi
+  done
+  echo "$json}"
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  health)   get /health | pp ;;
+  windows)  get /windows | pp ;;
+  tree)
+    if [[ "${1:-}" =~ ^[0-9]+$ ]]; then get "/tree?window=$1" | pp; else get /tree | pp; fi ;;
+  find)
+    text="${1:-}"; cls="${2:-}"
+    q="/find?text=$(printf %s "$text" | jq -sRr @uri 2>/dev/null || echo "$text")"
+    [[ -n "$cls" ]] && q+="&class=$cls"
+    get "$q" | pp ;;
+  shot)
+    out="${1:-ghidra-shot.png}"; shift || true
+    qs=""
+    for a in "$@"; do qs+="${qs:+&}$a"; done
+    curl -fsS "$BASE/screenshot${qs:+?$qs}" -o "$out"
+    echo "wrote $out" ;;
+  invoke)   post /invoke  "$(kvjson "$@")" | pp ;;
+  settext)
+    # last arg is the text; preceding key=value args (e.g. id=N) select target
+    text="${*: -1}"; set -- "${@:1:$#-1}"
+    post /settext "$(kvjson "$@" "text=$text")" | pp ;;
+  focus)    post /focus   "$(kvjson "$@")" | pp ;;
+  click)    post /click   "$(kvjson "$@")" | pp ;;
+  typetext) post /type    "$(kvjson "text=$*")" | pp ;;
+  press)    post /key     "$(kvjson "keys=$*")" | pp ;;
+  raw-get)  get "$1" ;;
+  help|*)
+    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac
