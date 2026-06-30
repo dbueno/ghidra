@@ -82,8 +82,15 @@ ghidra-gui shot out.png window=4  # render a window/component to PNG
 # In-JVM actions — NO macOS permissions required:
 ghidra-gui invoke id=6            # Swing doClick / dispatch a click
 ghidra-gui invoke text="I Agree"
+ghidra-gui invoke id=9 x=40 y=12 clicks=2   # double-click a point *inside* a component
+ghidra-gui invoke id=6 async=true           # don't block if the click opens a modal dialog
 ghidra-gui settext id=7 "main"   # set a text field
 ghidra-gui focus id=7
+
+# Drive Ghidra's own UI — NO macOS permissions required:
+ghidra-gui menu "File>Configure..."          # walk the in-frame menu bar and fire an item
+ghidra-gui gaction "Load SARIF file"         # invoke a Ghidra DockingAction by name
+ghidra-gui raise                             # bring the main window to the front
 
 # Robot actions — realistic OS input; needs Accessibility/Screen Recording:
 ghidra-gui click id=6
@@ -104,6 +111,40 @@ ghidra-gui press "ctrl shift E"
 Prefer the in-JVM layer for deterministic automation; reach for Robot when you
 specifically need real input or a true screen capture.
 
+### Driving Ghidra's docking framework (beyond plain Swing)
+
+Clicking raw Swing components is enough for dialogs and license screens, but it
+falls down on Ghidra's own UI. Three problems came up driving the taint/SARIF
+workflow end-to-end, each of which needed a dedicated capability:
+
+- **Menus don't open under `doClick`.** Ghidra runs an *in-frame* menu bar
+  (`-Dapple.laf.useScreenMenuBar=false`). `JMenu.doClick()` won't realize the
+  submenu items. **`/menu`** walks the `JMenuBar` with `JMenu.getMenuComponents()`,
+  matches each `>`-separated segment by text (exact → prefix → contains), descends
+  submenus without ever showing a popup, and fires the final item.
+
+- **Local actions need a *focused* provider.** Ghidra resolves a toolbar/menu
+  action's `ActionContext` from `getActiveComponentProvider()`, which depends on
+  real OS window focus. A background-driven JVM has none, so clicking the
+  "Load SARIF file" or "Apply all" buttons silently no-ops. **`/ghidraaction`**
+  invokes a `DockingAction` *by name* via reflection (`Class.forName` against the
+  Ghidra classloader), building a valid context from each `ComponentProvider`
+  itself — `provider.getActionContext(null)` — and only firing on a provider where
+  `isValidContext` / `isEnabledForContext` pass. This bypasses focus entirely.
+  (`/raise` exists for the cases where you genuinely do want the window fronted.)
+
+- **A click that opens a modal dialog deadlocks a single-threaded server.** The
+  modal event loop blocks the EDT, so an `invokeAndWait` from the HTTP handler
+  never returns. The bridge now uses a **cached thread pool** executor, and
+  `/invoke` takes an **`async`** flag (dispatch via `invokeLater`, return
+  immediately) so opening a dialog doesn't wedge the bridge.
+
+Two smaller additions support the above: `/invoke` accepts component-local
+**`x`/`y`** plus a **`clicks`** count (double-clicking a tree node or ticking a
+table checkbox without OS-level Robot input), and `/find` / `/tree` now expose
+each component's **tooltip** — Ghidra's toolbar buttons are icon-only with no text
+or accessible name, so the tooltip is often the only way to identify them.
+
 ### Example: a scripted smoke test
 
 ```sh
@@ -121,9 +162,12 @@ agentic-gui/ghidra-gui shot ghidra_main.png window=4
 | GET  | `/health` | | `{ok, headless, totalWindows, showingWindows}` |
 | GET  | `/windows` | | array of top-level windows |
 | GET  | `/tree` | `?window=N&visibleOnly=true` | nested component tree |
-| GET  | `/find` | `?text=...&class=...` | matching components |
+| GET  | `/find` | `?text=...&class=...` | matching components (incl. `tooltip`) |
 | GET  | `/screenshot` | `?window=N` / `?id=N` / `?robot=true` | `image/png` |
-| POST | `/invoke` | `{id}` or `{text}` | doClick / dispatch click |
+| POST | `/invoke` | `{id}`/`{text}`, `x,y`, `clicks`, `async` | doClick / dispatch click (optionally at a local point, multi-click, non-blocking) |
+| POST | `/menu` | `{path:"File>Configure..."}` | walk the in-frame menu bar and fire an item |
+| POST | `/ghidraaction` | `{name, owner?}` | invoke a Ghidra `DockingAction` by name (focus-independent, via reflection) |
+| POST | `/raise` | | bring the main window to the front |
 | POST | `/settext` | `{id, text}` | set text-field contents |
 | POST | `/focus` | `{id}` | request focus |
 | POST | `/click` | `{id}`/`{text}`/`{x,y}`, `clicks` | Robot click |
@@ -131,6 +175,8 @@ agentic-gui/ghidra-gui shot ghidra_main.png window=4
 | POST | `/key` | `{keys:"ctrl shift E"}` | Robot key combo |
 
 Components are addressed by stable integer `id`s assigned during tree/find walks.
+`/tree` and `/find` also report each component's `tooltip`, which is often the
+only label on Ghidra's icon-only toolbar buttons.
 
 ### Building just the agent
 

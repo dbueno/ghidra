@@ -70,6 +70,15 @@ case "$cmd" in
     curl -fsS "$BASE/screenshot${qs:+?$qs}" -o "$out"
     echo "wrote $out" ;;
   invoke)   post /invoke  "$(kvjson "$@")" | pp ;;
+  menu)
+    # ghidra-gui menu "File>Open Project..." [window=N]
+    path="$1"; shift || true
+    post /menu "$(kvjson "$@" "path=$path")" | pp ;;
+  raise)    post /raise   "$(kvjson "$@")" | pp ;;
+  gaction)
+    # ghidra-gui gaction "Load SARIF file" [owner=...]  -- invoke a Ghidra DockingAction by name
+    nm="$1"; shift || true
+    post /ghidraaction "$(kvjson "$@" "name=$nm")" | pp ;;
   settext)
     # last arg is the text; preceding key=value args (e.g. id=N) select target
     text="${*: -1}"; set -- "${@:1:$#-1}"
