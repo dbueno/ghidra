@@ -60,7 +60,7 @@ public class TaintOptions {
 	public final static String DEFAULT_TAINT_OUTPUT_DIR = "";
 
 	/* this is the text code that contains the datalog query the plugin writes. */
-	public final static String DEFAULT_TAINT_QUERY = "taintquery.dl";
+	public final static String DEFAULT_TAINT_QUERY = "taintquery.json5";
 	public final static String DEFAULT_TAINT_DB = "ctadlir.db";
 
 	public final static Boolean DEFAULT_GET_PATHS = true;

@@ -19,6 +19,11 @@ import java.io.File;
 import java.io.PrintWriter;
 import java.util.List;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+
 import generic.jar.ResourceFile;
 import ghidra.app.decompiler.*;
 import ghidra.app.plugin.core.decompiler.taint.*;
@@ -27,7 +32,6 @@ import ghidra.app.plugin.core.osgi.BundleHost;
 import ghidra.app.script.*;
 import ghidra.app.services.ConsoleService;
 import ghidra.program.model.address.Address;
-import ghidra.program.model.pcode.HighVariable;
 
 /**
  * Container for all the decompiler elements the users "selects" via the menu.
@@ -38,6 +42,11 @@ public class CTADLTaintState extends AbstractTaintState {
 	public CTADLTaintState(TaintPlugin plugin) {
 		super(plugin);
 		ENGINE_NAME = "ctadl";
+		// The rust/Ascent CTADL engine keeps its index in a directory-based
+		// parquet store under the output directory, not a single `ctadlir.db`
+		// file. Disable the base class's index-DB-file existence gate (which would
+		// otherwise abort every query); `Create Index` still builds the store.
+		usesIndex = false;
 	}
 
 	@Override
@@ -102,116 +111,135 @@ public class CTADLTaintState extends AbstractTaintState {
 		return perFunction ? "ExportPCodeForSingleFunction.java" : "ExportPCodeForCTADL.java";
 	}
 
-	@Override
-	protected void writeHeader(PrintWriter writer) {
-		writer.println("#include \"pcode/taintquery.dl\"");
-	}
-
-	/*
-	 * NOTE: This is the only method used now for Sources and Sinks.
+	/**
+	 * Writes the query as a single JSON5 "model generator" document, the format
+	 * the rust/Ascent CTADL engine consumes (see
+	 * {@code ctadl-ascent/src/models/ctadl-model-generator.schema.json}).
+	 *
+	 * <p>Each active source/sink mark becomes one model generator:
+	 * <ul>
+	 * <li>A function-name token &rarr; a {@code find: "methods"} generator that
+	 * taints the function's {@code Return} port.</li>
+	 * <li>Any other token (a variable at a program point) &rarr; a
+	 * {@code find: "instructions"} generator pinned, via an {@code address}
+	 * constraint, to the instruction the mark sits on. The engine seeds the
+	 * interior vertex/vertices defined or used there.</li>
+	 * </ul>
+	 *
+	 * Sanitizer/gate marks have no equivalent in the model format yet and are
+	 * skipped with a console note.
 	 */
 	@Override
-	protected void writeRule(PrintWriter writer, TaintLabel mark, boolean isSource) {
-		Boolean allAccess = taintOptions.getTaintUseAllAccess();
-		String method = isSource ? "TaintSource" : "LeakingSink";
-		Address addr = mark.getAddress();
-		boolean functionLevel = mark.getVarnodeAddress() == null;
+	public boolean writeQueryFile(File queryTextFile) throws Exception {
+		JsonArray generators = new JsonArray();
 
-		if (mark.getFunctionName() == null) {
-			return;
-		}
-
-		ClangToken token = mark.getToken();
-		if (token instanceof ClangFuncNameToken) {
-
-			writer.println(method + "Vertex(\"" + mark.getLabel() + "\", vn, p) :-");
-			writer.println("\tHFUNC_NAME(f, \"" + mark.getFunctionName() + "\"),");
-			writer.println("\tCFunction_FormalParam(f, n, vn),");
-			writer.println("\tCReturnParameter(n),");
-			writer.println("\tVertex(vn, p).");
-
-		}
-		else {
-
-			HighVariable hv = mark.getHighVariable();
-			String pathConstraint = null;
-			if (hv == null && token instanceof ClangFieldToken ftoken) {
-				ClangVariableToken vtoken = TaintState.getParentToken(ftoken);
-				if (vtoken != null) {
-					hv = vtoken.getHighVariable();
-					pathConstraint = token.getText();
-					token = vtoken;
+		for (TaintLabel mark : sources) {
+			if (mark.isActive()) {
+				JsonObject gen = buildGenerator(mark, true);
+				if (gen != null) {
+					generators.add(gen);
 				}
 			}
-			writer.println(method + "Vertex(\"" + mark.getLabel() + "\", vn, p) :-");
-			writer.println("\t((HFUNC_NAME(m, \"" + mark.getFunctionName() + "\"),");
-			writer.println("\tCVar_InFunction(vn, m)) ; CVar_isGlobal(vn)),");
-			if (!functionLevel && !mark.bySymbol()) {
-				writer.println("\t(PCODE_INPUT(i, _, vn) ; PCODE_OUTPUT(i, vn)),");
-				writer.println("\tPCODE_TARGET(i, " + addr.getOffset() + "),");
-			}
-			if (mark.bySymbol() && hv != null) {
-				writer.println("\t((SYMBOL_NAME(sym, \"" + token.getText() + "\"),");
-				writer.println("\tSYMBOL_HVAR(sym, hv),");
-				// Note this is an OR
-				writer.println("\tVNODE_HVAR(vn, hv));");
-				writer.println("\tCVar_SourceInfo(vn, SOURCE_INFO_NAME_KEY, \"" +
-					TaintState.varName(token, false) + "\")),");
-			}
-			else if (mark.bySymbol()) {
-				writer.println("\tSYMBOL_NAME(sym, \"" + token.getText() + "\"),");
-				writer.println("\tSYMBOL_HVAR(sym, hv),");
-				writer.println("\tVNODE_HVAR(vn, hv),");
-			}
-			else if (hv != null) {
-				writer.println("\tCVar_SourceInfo(vn, SOURCE_INFO_NAME_KEY, \"" +
-					TaintState.varName(token, false) + "\"),");
-			}
-			else {
-				writer.println("\t(CVar_SourceInfo(vn, SOURCE_INFO_NAME_KEY, \"" +
-					TaintState.varName(token, false) + "\");");
-			}
-			if (pathConstraint != null) {
-				writer.println("\tp = \"." + pathConstraint + "\",");
-			}
-			if (!allAccess) {
-				writer.println("\tp = \"\",");
-			}
-			writer.println("\tVertex(vn, p).");
-
 		}
+
+		for (TaintLabel mark : sinks) {
+			if (mark.isActive()) {
+				JsonObject gen = buildGenerator(mark, false);
+				if (gen != null) {
+					generators.add(gen);
+				}
+			}
+		}
+
+		for (TaintLabel mark : gates) {
+			if (mark.isActive()) {
+				plugin.consoleMessage(
+					"CTADL: sanitizer/gate marks are not supported by the JSON5 model " +
+						"format; skipping " + mark);
+			}
+		}
+
+		JsonObject root = new JsonObject();
+		root.add("model_generators", generators);
+
+		Gson gson = new GsonBuilder().setPrettyPrinting().create();
+		try (PrintWriter writer = new PrintWriter(queryTextFile)) {
+			writer.println(gson.toJson(root));
+		}
+
+		plugin.consoleMessage("Wrote Query File: " + queryTextFile);
+		return true;
+	}
+
+	/**
+	 * Builds a single model generator for a source or sink mark. Returns null if
+	 * the mark cannot be expressed (e.g. no enclosing function).
+	 */
+	private JsonObject buildGenerator(TaintLabel mark, boolean isSource) {
+		String function = mark.getFunctionName();
+		if (function == null) {
+			return null;
+		}
+
+		JsonArray where = new JsonArray();
+		JsonObject sigMatch = new JsonObject();
+		sigMatch.addProperty("constraint", "signature_match");
+		sigMatch.addProperty("name", function);
+		where.add(sigMatch);
+
+		// The taint label (kind) the user assigned to this mark.
+		JsonObject endpoint = new JsonObject();
+		endpoint.addProperty("kind", mark.getLabel());
+
+		JsonObject generator = new JsonObject();
+		ClangToken token = mark.getToken();
+		if (token instanceof ClangFuncNameToken) {
+			// Function-level: taint the function's return value.
+			generator.addProperty("find", "methods");
+			endpoint.addProperty("port", "Return");
+		}
+		else {
+			// Interior vertex: pin to the instruction address of the marked token.
+			generator.addProperty("find", "instructions");
+			Address addr = mark.getAddress();
+			long offset = addr != null ? addr.getOffset() : 0L;
+			JsonObject addrConstraint = new JsonObject();
+			addrConstraint.addProperty("constraint", "address");
+			addrConstraint.addProperty("value", "0x" + Long.toHexString(offset));
+			where.add(addrConstraint);
+			// Interior-vertex endpoints carry no port.
+		}
+
+		JsonArray endpoints = new JsonArray();
+		endpoints.add(endpoint);
+		JsonObject model = new JsonObject();
+		model.add(isSource ? "sources" : "sinks", endpoints);
+
+		generator.add("where", where);
+		generator.add("model", model);
+		return generator;
+	}
+
+	// The parent's per-mark line hooks are unused: writeQueryFile above emits a
+	// single structured JSON document instead of appending Datalog lines.
+	@Override
+	protected void writeHeader(PrintWriter writer) {
+		// unused (see writeQueryFile)
+	}
+
+	@Override
+	protected void writeRule(PrintWriter writer, TaintLabel mark, boolean isSource) {
+		// unused (see writeQueryFile)
 	}
 
 	@Override
 	public void writeGate(PrintWriter writer, TaintLabel mark) {
-		Boolean allAccess = taintOptions.getTaintUseAllAccess();
-		String method = "TaintSanitizeAll";
-		Address addr = mark.getAddress();
-		// NOTE: verify setting entryPoint as addr doesn't break things
-
-		if (mark.getFunctionName() == null) {
-			return;
-		}
-
-		writer.println(method + "Vertex(vn, p) :-");
-		if (!mark.isGlobal()) {
-			writer.println("\tHFUNC_NAME(m, \"" + mark.getFunctionName().toString() + "\"),");
-			writer.println("\tCVar_InFunction(vn, m),");
-		}
-		if (addr != null && addr.getOffset() != 0) {
-			writer.println("\tVNODE_PC_ADDRESS(vn, " + addr.getOffset() + "),");
-		}
-		writer.println("\tCVar_SourceInfo(vn, SOURCE_INFO_NAME_KEY, \"" +
-			TaintState.varName(mark.getToken(), false) + "\"),");
-		if (!allAccess) {
-			writer.println("\tp = \"\",");
-		}
-		writer.println("\tVertex(vn, p).");
+		// unused (see writeQueryFile)
 	}
 
 	@Override
 	protected void writeFooter(PrintWriter writer) {
-		// Nothing to do here
+		// unused (see writeQueryFile)
 	}
 
 }

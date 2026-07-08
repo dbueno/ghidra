@@ -101,6 +101,7 @@ public final class GuiAgent {
             server.createContext("/invoke", wrap(GuiAgent::invoke));
             server.createContext("/menu", wrap(GuiAgent::menu));
             server.createContext("/ghidraaction", wrap(GuiAgent::ghidraAction));
+            server.createContext("/setopt", wrap(GuiAgent::setopt));
             server.createContext("/raise", wrap(GuiAgent::raise));
             server.createContext("/settext", wrap(GuiAgent::settext));
             server.createContext("/focus", wrap(GuiAgent::focus));
@@ -1000,6 +1001,55 @@ public final class GuiAgent {
     }
 
     // --------------------------------------------------------------- plumbing
+
+    /**
+     * Set a Ghidra tool option in-JVM, bypassing the options dialog (whose GTree
+     * cannot be driven via synthetic events). Body:
+     * {"category":"Decompiler","name":"Taint.Query Engine","value":"ctadl"}.
+     * Applies to every running tool that has the given options category; returns
+     * how many tools were updated. Reaches the tools by reflection, exactly like
+     * {@link #ghidraAction}.
+     */
+    private static String setopt(HttpExchange ex, Map<String, String> q) throws Exception {
+        Map<String, String> body = parseJson(readBody(ex));
+        String category = body.get("category");
+        String name = body.get("name");
+        String value = body.get("value");
+        if (category == null || name == null || value == null) {
+            return err("need {category, name, value}");
+        }
+        final String[] result = {null};
+        onEdt(() -> {
+            try {
+                ClassLoader cl = GuiAgent.class.getClassLoader();
+                Class<?> dwmCls = Class.forName("docking.DockingWindowManager", true, cl);
+                java.lang.reflect.Method mGetAll = dwmCls.getMethod("getAllDockingWindowManagers");
+                java.lang.reflect.Method mGetTool = dwmCls.getMethod("getTool");
+                List<?> dwms = (List<?>) mGetAll.invoke(null);
+                int count = 0;
+                for (Object dwm : dwms) {
+                    Object tool = mGetTool.invoke(dwm);
+                    if (tool == null) {
+                        continue;
+                    }
+                    java.lang.reflect.Method mGetOptions =
+                            tool.getClass().getMethod("getOptions", String.class);
+                    Object opts = mGetOptions.invoke(tool, category);
+                    if (opts == null) {
+                        continue;
+                    }
+                    java.lang.reflect.Method mSetString =
+                            opts.getClass().getMethod("setString", String.class, String.class);
+                    mSetString.invoke(opts, name, value);
+                    count++;
+                }
+                result[0] = "{\"ok\":true,\"tools\":" + count + "}";
+            } catch (Exception e) {
+                result[0] = err("setopt failed: " + esc(String.valueOf(e)));
+            }
+        });
+        return result[0] != null ? result[0] : err("setopt failed");
+    }
 
     private interface EdtTask {
         void run() throws Exception;
