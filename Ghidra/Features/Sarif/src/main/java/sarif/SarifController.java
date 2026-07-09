@@ -222,6 +222,12 @@ public class SarifController implements ObjectSelectedListener<Map<String, Objec
 	public String getStateText(State state, String stateKey) {
 		String result = "";
 
+		// ctadl-rs emits code-flow threadFlowLocations without a "state" bag, so
+		// tfl.getState() is null; tolerate it instead of NPEing the whole load.
+		if (state == null) {
+			return result;
+		}
+
 		Map<String, MultiformatMessageString> state_mappings = state.getAdditionalProperties();
 
 		for (Map.Entry<String, MultiformatMessageString> pair : state_mappings.entrySet()) {
