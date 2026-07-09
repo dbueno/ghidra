@@ -50,7 +50,9 @@ public class SarifTaintCodeFlowResultHandler extends SarifResultHandler {
 
 		List<Map<String, Object>> tableResults = df.getTableResults();
 		String ruleId = result.getRuleId();
-		if (ruleId == null || !ruleId.equals("C0001")) {
+		// ctadl-rs emits suffixed rule IDs (e.g. "C0001.tainted-path"); match the
+		// bare prefix so the tainted-path code flow is still routed here.
+		if (ruleId == null || !ruleId.startsWith("C0001")) {
 			return;
 		}
 		String type = TaintRule.fromRuleId(ruleId).toString();
@@ -114,7 +116,10 @@ public class SarifTaintCodeFlowResultHandler extends SarifResultHandler {
 		Location loc = tfl.getLocation();
 		LogicalLocation ll = SarifUtils.getLogicalLocation(run, loc);
 		String name = ll.getName();
-		String fqname = ll.getDecoratedName();
+		// ctadl-rs sets fullyQualifiedName (name@addr) but not decoratedName; fall
+		// back to it so path-node address resolution below doesn't NPE.
+		String fqname = ll.getDecoratedName() != null ? ll.getDecoratedName()
+				: ll.getFullyQualifiedName();
 		String displayName = SarifUtils.extractDisplayName(ll);
 		map.put("originalName", name);
 		map.put("name", displayName);

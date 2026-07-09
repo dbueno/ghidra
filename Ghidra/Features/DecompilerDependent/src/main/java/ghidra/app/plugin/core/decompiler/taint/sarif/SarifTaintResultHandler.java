@@ -59,7 +59,9 @@ public class SarifTaintResultHandler extends SarifResultHandler {
 		this.result = res;
 
 		String ruleId = result.getRuleId();
-		if (ruleId == null || ruleId.equals("C0001")) {
+		// ctadl-rs emits suffixed rule IDs; skip the whole "C0001*" tainted-path
+		// family here so it is handled by SarifTaintCodeFlowResultHandler instead.
+		if (ruleId == null || ruleId.startsWith("C0001")) {
 			return;
 		}
 		map.put("type", TaintRule.fromRuleId(ruleId));
