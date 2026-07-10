@@ -16,7 +16,9 @@
 package ghidra.app.plugin.core.decompiler.taint.ctadl;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.PrintWriter;
+import java.nio.file.Path;
 import java.util.List;
 
 import com.google.gson.Gson;
@@ -24,6 +26,7 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
+import docking.widgets.filechooser.GhidraFileChooser;
 import generic.jar.ResourceFile;
 import ghidra.app.decompiler.*;
 import ghidra.app.plugin.core.decompiler.taint.*;
@@ -31,7 +34,10 @@ import ghidra.app.plugin.core.decompiler.taint.TaintPlugin.TaintDirection;
 import ghidra.app.plugin.core.osgi.BundleHost;
 import ghidra.app.script.*;
 import ghidra.app.services.ConsoleService;
+import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.listing.Program;
+import ghidra.util.Msg;
 
 /**
  * Container for all the decompiler elements the users "selects" via the menu.
@@ -49,6 +55,77 @@ public class CTADLTaintState extends AbstractTaintState {
 		usesIndex = false;
 	}
 
+	/**
+	 * Runs a query against the native ctadl store: writes the source/sink model file,
+	 * invokes {@code ctadl query <prog> -m <model> -o <out.sarif> --sarif-profile debug}
+	 * (store via {@code XDG_STATE_HOME}), then loads the resulting SARIF file through the
+	 * same handler path the legacy stdout flow used. Replaces the base class's
+	 * single-process, stdout-reading {@code queryIndex}.
+	 */
+	@Override
+	public boolean queryIndex(Program program, PluginTool tool, QueryType queryType) {
+		if (queryType.equals(QueryType.SRCSINK) && !isValid()) {
+			Msg.showWarn(this, tool.getActiveWindow(), getName() + " Query Warning",
+				getName() + " query cannot be performed because there are no sources or sinks.");
+			return false;
+		}
+
+		taintOptions = plugin.getOptions();
+		try {
+			File engineFile = Path.of(taintOptions.getTaintEnginePath()).toFile();
+			if (!engineFile.exists()) {
+				plugin.consoleMessage("The " + getName() + " binary (" +
+					engineFile.getCanonicalPath() + ") cannot be found; set Taint.Directories.Engine.");
+				return false;
+			}
+
+			String outputDir = taintOptions.getTaintOutputDirectory();
+			String store = taintOptions.getTaintStoreDirectory();
+			String prog = NativeCtadlRunner.sanitizeName(program.getName());
+
+			// Resolve the source/sink model file for this query.
+			File queryFile;
+			if (queryType.equals(QueryType.CUSTOM)) {
+				GhidraFileChooser chooser =
+					new GhidraFileChooser(plugin.getProvider().getComponent());
+				chooser.setCurrentDirectory(Path.of(outputDir).toFile());
+				queryFile = chooser.getSelectedFile();
+				if (queryFile == null) {
+					return false;
+				}
+			}
+			else {
+				// SRCSINK and DEFAULT both run the currently-active marks; writeQueryFile
+				// emits a {model_generators:[...]} document, which the native -m accepts.
+				queryFile = Path.of(outputDir, taintOptions.getTaintQueryDLName()).toFile();
+				writeQueryFile(queryFile);
+			}
+
+			File outSarif = Path.of(outputDir, prog + ".sarif").toFile();
+			plugin.consoleMessage("Using " + getName() + " binary: " + engineFile);
+
+			boolean ok = NativeCtadlRunner.query(engineFile.toString(), store, prog,
+				queryFile.getAbsolutePath(), outSarif.getAbsolutePath(),
+				msg -> plugin.consoleMessage(msg));
+			if (!ok) {
+				plugin.consoleMessage(getName() + " query did not complete successfully.");
+				return false;
+			}
+
+			try (FileInputStream fis = new FileInputStream(outSarif)) {
+				readQueryResultsIntoDataFrame(program, fis);
+			}
+			return true;
+		}
+		catch (Exception e) {
+			Msg.error(this, "Problems running query: " + e);
+			return false;
+		}
+	}
+
+	// buildQuery/buildIndex below are superseded by the native driver (queryIndex above
+	// and CreateTargetIndexTask's native import+index) and are retained only to satisfy
+	// the AbstractTaintState contract; they are no longer invoked.
 	@Override
 	public void buildQuery(List<String> paramList, String enginePath, File indexDBFile,
 			String indexDirectory) {

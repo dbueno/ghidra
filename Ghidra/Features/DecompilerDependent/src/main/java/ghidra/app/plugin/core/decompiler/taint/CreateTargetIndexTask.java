@@ -16,14 +16,11 @@
 package ghidra.app.plugin.core.decompiler.taint;
 
 import java.io.File;
-import java.io.IOException;
-import java.lang.ProcessBuilder.Redirect;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
 
 import docking.widgets.filechooser.GhidraFileChooser;
 import docking.widgets.filechooser.GhidraFileChooserMode;
+import ghidra.app.plugin.core.decompiler.taint.ctadl.NativeCtadlRunner;
 import ghidra.app.services.ConsoleService;
 import ghidra.framework.options.ToolOptions;
 import ghidra.framework.plugintool.PluginTool;
@@ -72,27 +69,15 @@ public class CreateTargetIndexTask extends Task {
 	}
 
 	private boolean indexProgram(String engine_path, String facts_path, String index_directory) {
-
-		boolean rvalue = true;
-
-		List<String> param_list = new ArrayList<String>();
-		plugin.getTaintState().buildIndex(param_list, engine_path, facts_path, index_directory);
-		Msg.info(this, "Index Param List: " + param_list.toString());
-
-		try {
-			ProcessBuilder pb = new ProcessBuilder(param_list);
-			pb.directory(new File(facts_path));
-			pb.redirectError(Redirect.INHERIT);
-			Process p = pb.start();
-			p.waitFor();
-
-		}
-		catch (IOException | InterruptedException e) {
-			Msg.error(this, "Problems running index: " + e);
-			rvalue = false;
-		}
-
-		return rvalue;
+		// Native ctadl: import the exported facts directory (Ghidra is skipped via the
+		// facts-dir short-circuit) then index it, keyed by the sanitized program name,
+		// into the store selected by Taint.Directories.Store (empty = ctadl default).
+		// index_directory is unused under the native store model.
+		String store = plugin.getOptions().getTaintStoreDirectory();
+		String prog = NativeCtadlRunner.sanitizeName(program.getName());
+		// Propagation (index-time) models come from the models panel; none yet.
+		return NativeCtadlRunner.importAndIndex(engine_path, store, prog, facts_path, null,
+			msg -> plugin.consoleMessage(msg));
 	}
 
 	@Override

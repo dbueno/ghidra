@@ -39,6 +39,8 @@ public class TaintOptions {
 	public final static String OP_KEY_TAINT_OUTPUT_DIR = "Taint.Directories.Output";
 	/* full path to where the engine executable lives. */
 	public final static String OP_KEY_TAINT_ENGINE_PATH = "Taint.Directories.Engine";
+	/* optional override for the native ctadl store (XDG_STATE_HOME); empty = ctadl default. */
+	public final static String OP_KEY_TAINT_STORE_DIR = "Taint.Directories.Store";
 
 	/* The default name of the text file containing the query. */
 	public final static String OP_KEY_TAINT_QUERY = "Taint.Query.Current Query";
@@ -58,6 +60,7 @@ public class TaintOptions {
 	public final static String DEFAULT_TAINT_ENGINE_PATH = "";
 	public final static String DEFAULT_TAINT_FACTS_DIR = "";
 	public final static String DEFAULT_TAINT_OUTPUT_DIR = "";
+	public final static String DEFAULT_TAINT_STORE_DIR = "";
 
 	/* this is the text code that contains the datalog query the plugin writes. */
 	public final static String DEFAULT_TAINT_QUERY = "taintquery.json5";
@@ -72,6 +75,7 @@ public class TaintOptions {
 	private String taintEnginePath;
 	private String taintFactsDir;
 	private String taintOutputDir;
+	private String taintStoreDir;
 
 	private String taintQuery;
 	private String taintDB;
@@ -111,6 +115,7 @@ public class TaintOptions {
 		taintEnginePath = DEFAULT_TAINT_ENGINE_PATH;
 		taintFactsDir = DEFAULT_TAINT_FACTS_DIR;
 		taintOutputDir = DEFAULT_TAINT_OUTPUT_DIR;
+		taintStoreDir = DEFAULT_TAINT_STORE_DIR;
 		taintQuery = DEFAULT_TAINT_QUERY;
 		taintDB = DEFAULT_TAINT_DB;
 		taintQueryOutputForm = TaintFormat.ALL;
@@ -148,6 +153,11 @@ public class TaintOptions {
 		opt.registerOption(OP_KEY_TAINT_OUTPUT_DIR, DEFAULT_TAINT_OUTPUT_DIR,
 			new HelpLocation(HelpTopics.DECOMPILER, "Taint Output Directory"),
 			"Base Path to output directory");
+
+		opt.registerOption(OP_KEY_TAINT_STORE_DIR, DEFAULT_TAINT_STORE_DIR,
+			new HelpLocation(HelpTopics.DECOMPILER, "Taint Store Directory"),
+			"Optional override for the native ctadl store (sets XDG_STATE_HOME); " +
+				"leave empty to use ctadl's default store location.");
 
 		opt.registerOption(OP_KEY_TAINT_QUERY, DEFAULT_TAINT_QUERY,
 			new HelpLocation(HelpTopics.DECOMPILER, "TaintQuery"),
@@ -197,6 +207,7 @@ public class TaintOptions {
 		taintQuery = opt.getString(OP_KEY_TAINT_QUERY, "");
 		// taintQueryResultsFile = opt.getString(OP_KEY_TAINT_QUERY_RESULTS, "");
 		taintOutputDir = opt.getString(OP_KEY_TAINT_OUTPUT_DIR, "");
+		taintStoreDir = opt.getString(OP_KEY_TAINT_STORE_DIR, "");
 		taintDB = opt.getString(OP_KEY_TAINT_DB, "");
 
 		taintQueryDirection = opt.getEnum(OP_KEY_TAINT_QUERY_DIRECTION, TaintDirection.DEFAULT);
@@ -226,6 +237,14 @@ public class TaintOptions {
 
 	public String getTaintOutputDirectory() {
 		return taintOutputDir;
+	}
+
+	/**
+	 * Optional override for the native ctadl store location (applied as
+	 * {@code XDG_STATE_HOME}). Empty string means use ctadl's own default store.
+	 */
+	public String getTaintStoreDirectory() {
+		return taintStoreDir;
 	}
 
 	public String getTaintQueryDLName() {
