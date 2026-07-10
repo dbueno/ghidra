@@ -202,10 +202,20 @@ public class SarifUtils {
 					}
 					break;
 
-				case "member":
+				case "member": {
 					// From sarif, we need to extract 2 addrs out of members.
 					// The first address is the function entry point.
-					return extractFQNameAddrPair(program, logLoc.getFullyQualifiedName()).get(0);
+					// ctadl-rs emits some member locations as a bare function name
+					// (no "@fnAddr:insnAddr"), for which extractFQNameAddrPair returns
+					// an empty list; tolerate that instead of indexing get(0) and
+					// aborting the entire SARIF load.
+					List<Address> addrPair =
+						extractFQNameAddrPair(program, logLoc.getFullyQualifiedName());
+					if (!addrPair.isEmpty()) {
+						return addrPair.get(0);
+					}
+					break;
+				}
 
 				case "variable":
 					// From sarif, we need to extract an addr and a var name.
