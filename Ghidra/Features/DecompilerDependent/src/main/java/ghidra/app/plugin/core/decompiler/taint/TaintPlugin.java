@@ -88,6 +88,7 @@ public class TaintPlugin extends ProgramPlugin implements TaintService {
 	// Source-Sink Specific.
 	private TaintProvider taintProvider;
 	private TaintDecompilerMarginProvider taintDecompMarginProvider;
+	private ghidra.app.plugin.core.decompiler.taint.ctadl.TaintModelPanel taintModelPanel;
 
 	public static enum Highlighter {
 		ALL("all", "variables"), LABELS("labels", "labels"), DEFAULT("default", "default");
@@ -425,10 +426,25 @@ public class TaintPlugin extends ProgramPlugin implements TaintService {
 		exportFuncAction.setMenuBarData(
 			new MenuData(new String[] { "Tools", "Source-Sink", "Re-export Function Facts" }));
 
+		DockingAction showModelsAction = new DockingAction("ShowTaintModels", HELP_LOCATION) {
+			@Override
+			public void actionPerformed(ActionContext context) {
+				plugin.showTaintModels();
+			}
+
+			@Override
+			public boolean isEnabledForContext(ActionContext context) {
+				return true;
+			}
+		};
+		showModelsAction.setMenuBarData(
+			new MenuData(new String[] { "Tools", "Source-Sink", "Show Taint Models" }));
+
 		tool.addAction(deleteFactsAndIndex);
 		tool.addAction(exportAllAction);
 		tool.addAction(exportFuncAction);
 		tool.addAction(saveTableDataAction);
+		tool.addAction(showModelsAction);
 	}
 
 	public TaintState getTaintState() {
@@ -441,6 +457,20 @@ public class TaintPlugin extends ProgramPlugin implements TaintService {
 
 	public TaintProvider getProvider() {
 		return taintProvider;
+	}
+
+	/**
+	 * Show (creating if needed) the Taint Models manager panel and refresh it from the
+	 * current authored-models set. Called after the picker adds models, and from the
+	 * Tools &rarr; Source-Sink menu.
+	 */
+	public void showTaintModels() {
+		if (taintModelPanel == null) {
+			taintModelPanel = new ghidra.app.plugin.core.decompiler.taint.ctadl.TaintModelPanel(this);
+			taintModelPanel.addToTool();
+		}
+		tool.showComponentProvider(taintModelPanel, true);
+		taintModelPanel.refresh();
 	}
 
 	public TaintOptions getOptions() {

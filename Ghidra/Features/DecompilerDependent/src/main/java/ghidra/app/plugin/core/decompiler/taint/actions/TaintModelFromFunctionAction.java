@@ -67,6 +67,7 @@ public class TaintModelFromFunctionAction extends TaintAbstractDecompilerAction 
 
 		List<TaintModel> models = dialog.getResult();
 		((CTADLTaintState) plugin.getTaintState()).addModels(models);
+		plugin.showTaintModels();
 		plugin.consoleMessage("Added " + models.size() + " taint model(s) for " +
 			FunctionPortResolver.resolveTarget(target).getName() +
 			"; run 'Run default taint query' to apply.");

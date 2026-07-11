@@ -246,8 +246,12 @@ public class CTADLTaintState extends AbstractTaintState {
 		}
 
 		// Function-centric models authored via the picker (source/sink only; propagation
-		// models are index-time and are applied during Create Index, not here).
+		// models are index-time and are applied during Create Index, not here). Only
+		// enabled models (see the Taint Models panel) contribute to the query.
 		for (TaintModel m : authoredModels) {
+			if (!m.enabled()) {
+				continue;
+			}
 			JsonObject gen = taintModelToGenerator(m);
 			if (gen != null) {
 				generators.add(gen);
