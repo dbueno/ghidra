@@ -147,7 +147,7 @@ public class TaintModelDialog extends DialogComponentProvider {
 		prop.add(addBar, BorderLayout.SOUTH);
 		panel.add(prop, BorderLayout.SOUTH);
 
-		addPropRow(); // start with one empty pair
+		// Start with no propagation rows — propagation is opt-in via "+ Add pair".
 
 		int height = 40 + (n + 1) * 30 + 150;
 		panel.setPreferredSize(new Dimension(660, height));
