@@ -19,6 +19,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.PrintWriter;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 import com.google.gson.Gson;
@@ -33,6 +34,7 @@ import ghidra.app.plugin.core.decompiler.taint.*;
 import ghidra.app.plugin.core.decompiler.taint.TaintPlugin.TaintDirection;
 import ghidra.app.plugin.core.osgi.BundleHost;
 import ghidra.app.script.*;
+import ghidra.app.plugin.core.decompiler.taint.ctadl.model.TaintModel;
 import ghidra.app.services.ConsoleService;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
@@ -44,6 +46,13 @@ import ghidra.util.Msg;
  * This data is used to build queries.
  */
 public class CTADLTaintState extends AbstractTaintState {
+
+	/**
+	 * Function-centric models authored via the picker dialog ({@link TaintModelDialog}).
+	 * Source/sink models here are emitted into the query file alongside the legacy marks;
+	 * this is the seed of the models set the manager panel will own.
+	 */
+	private final List<TaintModel> authoredModels = new ArrayList<>();
 
 	public CTADLTaintState(TaintPlugin plugin) {
 		super(plugin);
@@ -236,6 +245,15 @@ public class CTADLTaintState extends AbstractTaintState {
 			}
 		}
 
+		// Function-centric models authored via the picker (source/sink only; propagation
+		// models are index-time and are applied during Create Index, not here).
+		for (TaintModel m : authoredModels) {
+			JsonObject gen = taintModelToGenerator(m);
+			if (gen != null) {
+				generators.add(gen);
+			}
+		}
+
 		JsonObject root = new JsonObject();
 		root.add("model_generators", generators);
 
@@ -295,6 +313,49 @@ public class CTADLTaintState extends AbstractTaintState {
 		generator.add("where", where);
 		generator.add("model", model);
 		return generator;
+	}
+
+	/**
+	 * Converts a picker-authored source/sink {@link TaintModel} into a {@code find:"methods"}
+	 * model generator. Propagation models return null (they are index-time, not query-time).
+	 */
+	private JsonObject taintModelToGenerator(TaintModel m) {
+		if (m.role() == TaintModel.Role.PROPAGATION) {
+			return null;
+		}
+		JsonArray names = new JsonArray();
+		for (String fn : m.functionNames()) {
+			names.add(fn);
+		}
+		JsonObject sig = new JsonObject();
+		sig.addProperty("constraint", "signature_match");
+		sig.add("names", names);
+		JsonArray where = new JsonArray();
+		where.add(sig);
+
+		JsonObject endpoint = new JsonObject();
+		endpoint.addProperty("port", m.port());
+		endpoint.addProperty("kind", m.kind());
+		JsonArray endpoints = new JsonArray();
+		endpoints.add(endpoint);
+		JsonObject model = new JsonObject();
+		model.add(m.role() == TaintModel.Role.SOURCE ? "sources" : "sinks", endpoints);
+
+		JsonObject gen = new JsonObject();
+		gen.addProperty("find", "methods");
+		gen.add("where", where);
+		gen.add("model", model);
+		return gen;
+	}
+
+	/** Adds picker-authored models (see {@link TaintModelDialog}) to this state's model set. */
+	public void addModels(List<TaintModel> models) {
+		authoredModels.addAll(models);
+	}
+
+	/** The picker-authored models currently held by this state. */
+	public List<TaintModel> getAuthoredModels() {
+		return authoredModels;
 	}
 
 	// The parent's per-mark line hooks are unused: writeQueryFile above emits a
