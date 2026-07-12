@@ -35,9 +35,13 @@ import ghidra.app.plugin.ProgramPlugin;
 import ghidra.app.plugin.core.decompile.DecompilerProvider;
 import ghidra.app.plugin.core.decompiler.taint.TaintState.MarkType;
 import ghidra.app.plugin.core.decompiler.taint.TaintState.TaskType;
+import ghidra.app.plugin.core.decompiler.taint.ctadl.CTADLTaintState;
+import ghidra.app.plugin.core.decompiler.taint.ctadl.model.TaintModel;
+import ghidra.app.plugin.core.decompiler.taint.ctadl.model.TaintModelCodec;
 import ghidra.app.script.GhidraScript;
 import ghidra.app.script.GhidraState;
 import ghidra.app.services.ConsoleService;
+import ghidra.framework.options.SaveState;
 import ghidra.framework.plugintool.*;
 import ghidra.framework.plugintool.util.PluginStatus;
 import ghidra.program.database.SpecExtension;
@@ -161,6 +165,16 @@ public class TaintPlugin extends ProgramPlugin implements TaintService {
 	private DecompilerHighlightService highlightService;
 
 	private TaintState state;
+
+	/** SaveState key under which the authored taint models are persisted in tool state. */
+	private static final String MODELS_STATE_KEY = "ctadl.models";
+
+	/**
+	 * Authored models restored from tool state before a {@link CTADLTaintState} exists. Flushed
+	 * into the state once it is created (see {@link #setTaintState}); until then this is also the
+	 * source of truth for {@link #writeConfigState}.
+	 */
+	private final java.util.List<TaintModel> pendingModels = new java.util.ArrayList<>();
 
 	// Taint Tree Provider Stuff
 	static final String SHOW_TAINT_TREE_ACTION_NAME = "Taint Slice Tree";
@@ -453,6 +467,50 @@ public class TaintPlugin extends ProgramPlugin implements TaintService {
 
 	public void setTaintState(TaintState state) {
 		this.state = state;
+		// Flush any models restored from tool state before the ctadl state existed.
+		if (state instanceof CTADLTaintState c && !pendingModels.isEmpty()) {
+			c.addModels(new java.util.ArrayList<>(pendingModels));
+			pendingModels.clear();
+			if (taintModelPanel != null) {
+				taintModelPanel.refresh();
+			}
+		}
+	}
+
+	/**
+	 * The canonical authored-models list: the ctadl state's list once it exists, otherwise the
+	 * pending list restored from tool state.
+	 */
+	private java.util.List<TaintModel> currentAuthoredModels() {
+		if (state instanceof CTADLTaintState c) {
+			return c.getAuthoredModels();
+		}
+		return pendingModels;
+	}
+
+	@Override
+	public void writeConfigState(SaveState saveState) {
+		super.writeConfigState(saveState);
+		saveState.putString(MODELS_STATE_KEY, TaintModelCodec.encode(currentAuthoredModels()));
+	}
+
+	@Override
+	public void readConfigState(SaveState saveState) {
+		super.readConfigState(saveState);
+		String encoded = saveState.getString(MODELS_STATE_KEY, null);
+		if (encoded == null || encoded.isEmpty()) {
+			return;
+		}
+		List<TaintModel> restored = TaintModelCodec.decode(encoded);
+		if (state instanceof CTADLTaintState c) {
+			c.addModels(restored);
+		}
+		else {
+			pendingModels.addAll(restored);
+		}
+		if (taintModelPanel != null) {
+			taintModelPanel.refresh();
+		}
 	}
 
 	public TaintProvider getProvider() {
