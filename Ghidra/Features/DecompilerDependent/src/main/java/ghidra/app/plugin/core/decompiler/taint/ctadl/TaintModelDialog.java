@@ -73,6 +73,15 @@ public class TaintModelDialog extends DialogComponentProvider {
 	}
 
 	public TaintModelDialog(Function function) {
+		this(function, List.of());
+	}
+
+	/**
+	 * Edit-in-place constructor: pre-fills the picker from {@code seed}, the existing models for
+	 * this function, so the analyst can adjust them instead of deleting and re-adding. On OK the
+	 * caller replaces the function's whole model set with {@link #getResult()}.
+	 */
+	public TaintModelDialog(Function function, List<TaintModel> seed) {
 		super("Model taint for " + FunctionPortResolver.resolveTarget(function).getName());
 		Function target = FunctionPortResolver.resolveTarget(function);
 		this.functionName = target.getName();
@@ -80,8 +89,72 @@ public class TaintModelDialog extends DialogComponentProvider {
 		addWorkPanel(buildPanel());
 		addOKButton();
 		addCancelButton();
-		setOkButtonText("Add model");
+		setOkButtonText(seed.isEmpty() ? "Add model" : "Update model");
 		setResizable(true);
+		applySeed(seed);
+	}
+
+	/** Pre-fill the grid and propagation rows from existing models (edit-in-place). */
+	private void applySeed(List<TaintModel> seed) {
+		for (TaintModel m : seed) {
+			if (m.role() == TaintModel.Role.PROPAGATION) {
+				seedPropagation(m);
+			}
+			else {
+				seedEndpoint(m);
+			}
+		}
+	}
+
+	private void seedEndpoint(TaintModel m) {
+		int i = portIndex(basePortOf(m.port()));
+		if (i < 0) {
+			return; // the port no longer exists on this function
+		}
+		// Set the role first (its listener defaults the kind); then override with the saved kind.
+		roleCombos[i].setSelectedItem(m.role() == TaintModel.Role.SOURCE ? "source" : "sink");
+		kindFields[i].setText(m.kind() == null ? "" : m.kind());
+		derefChecks[i].setSelected(isDeref(m.port()));
+	}
+
+	private void seedPropagation(TaintModel m) {
+		addPropRow();
+		PropRow row = propRows.get(propRows.size() - 1);
+		selectPort(row.in, row.inPorts, basePortOf(m.inputPort()));
+		row.inDeref.setSelected(isDeref(m.inputPort()));
+		selectPort(row.out, row.outPorts, basePortOf(m.outputPort()));
+		row.outDeref.setSelected(isDeref(m.outputPort()));
+	}
+
+	/** Select the dropdown entry for {@code basePort} (leave on NONE if it is not in the list). */
+	private void selectPort(JComboBox<String> combo, List<PortOption> ps, String basePort) {
+		for (int i = 0; i < ps.size(); i++) {
+			if (ps.get(i).basePort().equals(basePort)) {
+				combo.setSelectedIndex(i + 1);
+				return;
+			}
+		}
+	}
+
+	/** Grid row index whose port has this base port (e.g. "Argument(1)"), or -1 if none. */
+	private int portIndex(String basePort) {
+		for (int i = 0; i < ports.size(); i++) {
+			if (ports.get(i).basePort().equals(basePort)) {
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	private static boolean isDeref(String port) {
+		return port != null && port.endsWith(".deref");
+	}
+
+	private static String basePortOf(String port) {
+		if (port == null) {
+			return "";
+		}
+		return port.endsWith(".deref") ? port.substring(0, port.length() - ".deref".length()) : port;
 	}
 
 	@SuppressWarnings("unchecked")

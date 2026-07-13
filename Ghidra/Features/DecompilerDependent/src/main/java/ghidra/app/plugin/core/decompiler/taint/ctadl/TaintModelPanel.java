@@ -5,6 +5,9 @@ package ghidra.app.plugin.core.decompiler.taint.ctadl;
 
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.util.ArrayList;
 import java.util.List;
 
 import javax.swing.*;
@@ -18,14 +21,17 @@ import ghidra.app.plugin.core.decompiler.taint.TaintPlugin;
 import ghidra.app.plugin.core.decompiler.taint.TaintState;
 import ghidra.app.plugin.core.decompiler.taint.ctadl.model.TaintModel;
 import ghidra.framework.plugintool.ComponentProviderAdapter;
+import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import resources.Icons;
 
 /**
  * Dockable manager for the function-centric taint models authored via {@link TaintModelDialog}.
  * Lists each model (enabled · function · role · port(s) · kind), lets the analyst toggle a model
- * on/off (only enabled models feed the query) or delete it. Backed by the live authored-models
- * list in {@link CTADLTaintState}.
+ * on/off (only enabled models feed the query), delete it, or double-click a row to edit that
+ * function's models in the picker (pre-filled). Backed by the live authored-models list in
+ * {@link CTADLTaintState}.
  *
  * <p>Propagation models are index-time: toggling one warns that a re-index is required, and a
  * banner reflects the {@link ghidra.app.plugin.core.decompiler.taint.ctadl.model.IndexFreshness}
@@ -47,6 +53,22 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 		tableModel = new ModelTableModel();
 		table = new GTable(tableModel);
 		table.getColumnModel().getColumn(0).setMaxWidth(60); // Enabled checkbox
+
+		// Double-click a row (outside the Enabled checkbox) to edit the function's models in the
+		// picker, pre-filled with its current models.
+		table.addMouseListener(new MouseAdapter() {
+			@Override
+			public void mouseClicked(MouseEvent e) {
+				if (e.getClickCount() != 2 || !SwingUtilities.isLeftMouseButton(e)) {
+					return;
+				}
+				int row = table.rowAtPoint(e.getPoint());
+				int col = table.columnAtPoint(e.getPoint());
+				if (row >= 0 && col != 0) {
+					editRow(row);
+				}
+			}
+		});
 
 		staleBanner = new JLabel();
 		staleBanner.setForeground(Color.RED.darker());
@@ -85,6 +107,82 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 		delete.setToolBarData(new ToolBarData(Icons.DELETE_ICON));
 		delete.setPopupMenuData(new docking.action.MenuData(new String[] { "Delete model" }));
 		addLocalAction(delete);
+	}
+
+	/**
+	 * Edit-in-place: reopen the picker for the clicked row's function, seeded with <em>all</em> of
+	 * that function's current models (the picker is function-scoped — it authors multiple models
+	 * per function at once). On OK, the function's whole model set is replaced with the result.
+	 */
+	private void editRow(int row) {
+		CTADLTaintState state = currentState();
+		if (state == null) {
+			return;
+		}
+		List<TaintModel> models = currentModels();
+		if (row < 0 || row >= models.size()) {
+			return;
+		}
+		TaintModel clicked = models.get(row);
+
+		Program program = plugin.getCurrentProgram();
+		if (program == null) {
+			Msg.showWarn(this, null, "Cannot edit model", "Open the program to edit its taint models.");
+			return;
+		}
+		Function func = resolveFunction(program, clicked.functionNames());
+		if (func == null) {
+			Msg.showWarn(this, null, "Cannot edit model", "Function '" +
+				String.join(",", clicked.functionNames()) + "' was not found in the current program.");
+			return;
+		}
+
+		// The picker is function-scoped, so gather every model for the same function and edit them
+		// together. Re-authored models come back enabled (the picker has no enabled toggle).
+		List<TaintModel> group = new ArrayList<>();
+		for (TaintModel m : models) {
+			if (m.functionNames().equals(clicked.functionNames())) {
+				group.add(m);
+			}
+		}
+
+		TaintModelDialog dialog = new TaintModelDialog(func, group);
+		plugin.getTool().showDialog(dialog);
+		if (dialog.isCancelled()) {
+			return;
+		}
+
+		// Replace the function's whole model set with the re-authored result. Removing a
+		// propagation model (and adding via addModels) both notify IndexFreshness.
+		models.removeAll(group);
+		for (TaintModel m : group) {
+			state.getIndexFreshness().onModelChanged(m);
+		}
+		state.addModels(dialog.getResult());
+		refresh();
+	}
+
+	/**
+	 * Resolve the function named by a model. Checks global (in-memory) functions first — including
+	 * PLT thunks — then external/imported functions (e.g. libc {@code recv}), which live outside the
+	 * global namespace but are what the model stores (the picker records the thunked target's name).
+	 * Returns null if no function matches.
+	 */
+	private static Function resolveFunction(Program program, List<String> names) {
+		if (names.isEmpty()) {
+			return null;
+		}
+		String name = names.get(0);
+		List<Function> globals = program.getListing().getGlobalFunctions(name);
+		if (!globals.isEmpty()) {
+			return globals.get(0);
+		}
+		for (Function f : program.getFunctionManager().getExternalFunctions()) {
+			if (name.equals(f.getName())) {
+				return f;
+			}
+		}
+		return null;
 	}
 
 	/** The current ctadl state, or null if the active taint engine is not ctadl. */
