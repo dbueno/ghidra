@@ -37,7 +37,9 @@ public class TaintSinkBySymbolAction extends TaintAbstractDecompilerAction {
 	public TaintSinkBySymbolAction(TaintPlugin plugin) {
 		super("Mark Sink (Symbol)");
 		setHelpLocation(new HelpLocation(TaintPlugin.HELP_LOCATION, "TaintSinkSymbol"));
-		setPopupMenuData(new MenuData(new String[] { "Taint", "Sink (Symbol)" }, "Decompile"));
+		// Experimental escape hatch; primary path is Taint -> Model function ports…
+		setPopupMenuData(
+			new MenuData(new String[] { "Taint", "Experimental", "Sink (symbol)" }, "Decompile"));
 		this.plugin = plugin;
 		this.mtype = MarkType.SINK;
 	}

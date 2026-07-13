@@ -42,7 +42,10 @@ public class TaintSinkAction extends TaintAbstractDecompilerAction {
 	public TaintSinkAction(TaintPlugin plugin) {
 		super("Mark Sink");
 		setHelpLocation(new HelpLocation(TaintPlugin.HELP_LOCATION, "TaintSink"));
-		setPopupMenuData(new MenuData(new String[] { "Taint", "Sink" }, "Decompile"));
+		// Experimental: interior-varnode marking is the escape hatch; the function-centric picker
+		// (Taint -> Model function ports…) is the primary path. Demoted under Taint -> Experimental.
+		setPopupMenuData(
+			new MenuData(new String[] { "Taint", "Experimental", "Sink (varnode)" }, "Decompile"));
 		setKeyBindingData(new KeyBindingData(KeyEvent.VK_S, InputEvent.SHIFT_DOWN_MASK));
 		this.plugin = plugin;
 		this.mtype = MarkType.SINK;

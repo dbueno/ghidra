@@ -51,8 +51,10 @@ public class TaintSourceAction extends TaintAbstractDecompilerAction {
 	public TaintSourceAction(TaintPlugin plugin) {
 		super("Mark Source");
 		setHelpLocation(new HelpLocation(TaintPlugin.HELP_LOCATION, "TaintSource"));
-		// Taint Menu  -> Source sub item.
-		setPopupMenuData(new MenuData(new String[] { "Taint", "Source" }, "Decompile"));
+		// Experimental: interior-varnode marking is the escape hatch; the function-centric picker
+		// (Taint -> Model function ports…) is the primary path. Demoted under Taint -> Experimental.
+		setPopupMenuData(
+			new MenuData(new String[] { "Taint", "Experimental", "Source (varnode)" }, "Decompile"));
 		// Key Binding Capital S
 		setKeyBindingData(new KeyBindingData(KeyEvent.VK_S, 0));
 		this.plugin = plugin;

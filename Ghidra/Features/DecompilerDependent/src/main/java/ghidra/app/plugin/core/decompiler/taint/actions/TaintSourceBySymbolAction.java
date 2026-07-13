@@ -48,7 +48,9 @@ public class TaintSourceBySymbolAction extends TaintAbstractDecompilerAction {
 		super("Mark Source (Symbol)");
 		setHelpLocation(new HelpLocation(TaintPlugin.HELP_LOCATION, "TaintSourceSymbol"));
 		// Taint Menu  -> Source sub item.
-		setPopupMenuData(new MenuData(new String[] { "Taint", "Source (Symbol)" }, "Decompile"));
+		// Experimental escape hatch; primary path is Taint -> Model function ports…
+		setPopupMenuData(
+			new MenuData(new String[] { "Taint", "Experimental", "Source (symbol)" }, "Decompile"));
 		this.plugin = plugin;
 		this.mtype = MarkType.SOURCE;
 	}
