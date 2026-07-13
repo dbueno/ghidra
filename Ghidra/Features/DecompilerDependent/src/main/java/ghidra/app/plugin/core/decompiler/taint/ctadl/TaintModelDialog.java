@@ -204,14 +204,15 @@ public class TaintModelDialog extends DialogComponentProvider {
 				continue;
 			}
 			String port = ports.get(i).portString(derefChecks[i].isSelected());
+			String portDisp = ports.get(i).displayPort(derefChecks[i].isSelected());
 			String kind = kindFields[i].getText().isBlank()
 					? ("source".equals(role) ? "user_input" : "buffer_overflow")
 					: kindFields[i].getText().trim();
 			if ("source".equals(role)) {
-				result.add(TaintModel.source(fn, port, kind));
+				result.add(TaintModel.source(fn, port, kind, portDisp));
 			}
 			else {
-				result.add(TaintModel.sink(fn, port, kind));
+				result.add(TaintModel.sink(fn, port, kind, portDisp));
 			}
 		}
 
@@ -221,7 +222,9 @@ public class TaintModelDialog extends DialogComponentProvider {
 			if (inIdx > 0 && outIdx > 0) {
 				String in = ports.get(inIdx - 1).portString(row.inDeref.isSelected());
 				String out = ports.get(outIdx - 1).portString(row.outDeref.isSelected());
-				result.add(TaintModel.propagation(fn, in, out));
+				String inDisp = ports.get(inIdx - 1).displayPort(row.inDeref.isSelected());
+				String outDisp = ports.get(outIdx - 1).displayPort(row.outDeref.isSelected());
+				result.add(TaintModel.propagation(fn, in, out, inDisp, outDisp));
 			}
 		}
 

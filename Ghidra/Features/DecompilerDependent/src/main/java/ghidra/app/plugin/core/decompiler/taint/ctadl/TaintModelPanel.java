@@ -152,8 +152,8 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 				case 1 -> String.join(",", m.functionNames());
 				case 2 -> m.role().name().toLowerCase();
 				case 3 -> m.role() == TaintModel.Role.PROPAGATION
-						? m.inputPort() + " → " + m.outputPort()
-						: m.port();
+						? disp(m.inputDisplay(), m.inputPort()) + " → " + disp(m.outputDisplay(), m.outputPort())
+						: disp(m.portDisplay(), m.port());
 				case 4 -> m.role() == TaintModel.Role.PROPAGATION ? "" : m.kind();
 				default -> "";
 			};
@@ -176,6 +176,10 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 				refresh();
 				Msg.showWarn(this, null, "Re-index required", CTADLTaintState.REINDEX_WARNING);
 			}
+		}
+
+		private static String disp(String display, String raw) {
+			return display != null ? display : raw;
 		}
 	}
 }

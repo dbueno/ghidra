@@ -42,14 +42,14 @@ public final class FunctionPortResolver {
 		List<PortOption> out = new ArrayList<>();
 		DataType ret = f.getReturnType();
 		if (ret != null && !(ret instanceof VoidDataType)) {
-			out.add(new PortOption("return: " + ret.getName(), "Return", ret instanceof Pointer));
+			out.add(new PortOption("return: " + ret.getName(), "Return", ret instanceof Pointer, "return"));
 		}
 		Parameter[] ps = f.getParameters();
 		for (int i = 0; i < ps.length; i++) {
 			DataType pt = ps[i].getDataType();
 			String nm = ps[i].getName();
 			out.add(new PortOption("arg" + i + ": " + pt.getName() + " " + nm,
-				"Argument(" + i + ")", pt instanceof Pointer));
+				"Argument(" + i + ")", pt instanceof Pointer, nm));
 		}
 		return out;
 	}
