@@ -3,6 +3,7 @@
  */
 package ghidra.app.plugin.core.decompiler.taint.ctadl;
 
+import ghidra.app.plugin.core.decompiler.taint.ctadl.engine.MatchCount;
 import ghidra.app.plugin.core.decompiler.taint.ctadl.engine.NativeCtadlCommand;
 
 import java.io.BufferedReader;
@@ -31,8 +32,8 @@ public final class NativeCtadlRunner {
 		return programName.replaceAll("[^A-Za-z0-9._-]", "_");
 	}
 
-	private static int run(List<String> argv, String storeDir, File workDir, Consumer<String> log)
-			throws IOException, InterruptedException {
+	private static int run(List<String> argv, String storeDir, File workDir, boolean mergeStderr,
+			Consumer<String> log) throws IOException, InterruptedException {
 		ProcessBuilder pb = new ProcessBuilder(argv);
 		if (workDir != null) {
 			pb.directory(workDir);
@@ -41,7 +42,14 @@ public final class NativeCtadlRunner {
 		// otherwise ctadl uses its own default ($XDG_STATE_HOME/ctadl).
 		String store = (storeDir == null || storeDir.isBlank()) ? null : storeDir;
 		pb.environment().putAll(NativeCtadlCommand.storeEnv(store));
-		pb.redirectError(Redirect.INHERIT);
+		if (mergeStderr) {
+			// Fold stderr into stdout so the reader loop sees engine diagnostics — including the
+			// "Matched N sources and M sinks" line. Used for the query phase only.
+			pb.redirectErrorStream(true);
+		}
+		else {
+			pb.redirectError(Redirect.INHERIT);
+		}
 		log.accept("ctadl: " + String.join(" ", argv));
 		Process p = pb.start();
 		try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
@@ -64,13 +72,13 @@ public final class NativeCtadlRunner {
 			String factsDir, String propagationJsonl, Consumer<String> log) {
 		try {
 			int ic = run(NativeCtadlCommand.importCmd(engine, prog, factsDir), storeDir,
-				new File(factsDir), log);
+				new File(factsDir), false, log);
 			if (ic != 0) {
 				log.accept("ctadl import failed (exit " + ic + ")");
 				return false;
 			}
 			int xc = run(NativeCtadlCommand.indexCmd(engine, prog, propagationJsonl), storeDir,
-				new File(factsDir), log);
+				new File(factsDir), false, log);
 			if (xc != 0) {
 				log.accept("ctadl index failed (exit " + xc + ")");
 				return false;
@@ -87,16 +95,33 @@ public final class NativeCtadlRunner {
 	 * Run a query for {@code prog} using the source/sink model file {@code queryModelFile},
 	 * writing SARIF (debug profile) to {@code outSarif}.
 	 *
+	 * <p>stderr is merged into stdout ({@code mergeStderr=true}) so the engine's
+	 * {@code "Matched N sources and M sinks"} line reaches the plugin console. When the
+	 * count shows 0 on either side an advisory note is appended explaining that no taint
+	 * paths are possible and suggesting a model check.
+	 *
 	 * @return true iff the query exited 0.
 	 */
 	public static boolean query(String engine, String storeDir, String prog, String queryModelFile,
 			String outSarif, Consumer<String> log) {
 		try {
+			// stderr is merged (mergeStderr=true) so "Matched N sources and M sinks" reaches the
+			// console; sniff it to advise when a query matched 0 sources or 0 sinks.
+			MatchCount[] seen = { null };
+			Consumer<String> sniff = line -> {
+				MatchCount.parse(line).ifPresent(mc -> seen[0] = mc);
+				log.accept(line);
+			};
 			int qc = run(NativeCtadlCommand.queryCmd(engine, prog, queryModelFile, outSarif),
-				storeDir, null, log);
+				storeDir, null, true, sniff);
 			if (qc != 0) {
 				log.accept("ctadl query failed (exit " + qc + ")");
 				return false;
+			}
+			if (seen[0] != null && seen[0].isEmptyMatch()) {
+				log.accept("Note: the query matched " + seen[0].sources() + " source(s) and " +
+					seen[0].sinks() + " sink(s); with 0 on either side there can be no taint paths — " +
+					"check that your source/sink models name functions present in this program.");
 			}
 			return true;
 		}
