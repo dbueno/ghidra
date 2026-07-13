@@ -19,6 +19,7 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.Reference;
 import ghidra.util.HelpLocation;
+import ghidra.util.Msg;
 import ghidra.util.UndefinedFunction;
 
 /**
@@ -71,6 +72,14 @@ public class TaintModelFromFunctionAction extends TaintAbstractDecompilerAction 
 		plugin.consoleMessage("Added " + models.size() + " taint model(s) for " +
 			FunctionPortResolver.resolveTarget(target).getName() +
 			"; run 'Run default taint query' to apply.");
+
+		// Propagation models are index-time: warn once (per picker session) that a re-index is
+		// needed. Source/sink models are query-time and need no re-index.
+		boolean anyPropagation = models.stream()
+				.anyMatch(m -> m.role() == TaintModel.Role.PROPAGATION);
+		if (anyPropagation) {
+			Msg.showWarn(this, null, "Re-index required", CTADLTaintState.REINDEX_WARNING);
+		}
 	}
 
 	/**

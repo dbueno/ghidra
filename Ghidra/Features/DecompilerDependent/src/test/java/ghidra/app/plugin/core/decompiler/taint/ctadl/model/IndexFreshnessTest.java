@@ -5,7 +5,9 @@ public class IndexFreshnessTest {
   static void check(String n, boolean c){ System.out.println((c?"ok: ":"FAIL: ")+n); if(!c) fails++; }
   public static void main(String[] a){
     IndexFreshness f = new IndexFreshness();
-    check("starts stale", f.isStale());
+    check("starts in sync (not stale)", !f.isStale());
+    f.onModelChanged(TaintModel.propagation(List.of("memcpy"),"Argument(1).deref","Argument(0).deref"));
+    check("propagation change from fresh restales", f.isStale());
     f.markIndexed(); check("clean after index", !f.isStale());
     f.onModelChanged(TaintModel.source(List.of("recv"),"Argument(1).deref","user_input"));
     check("source change does not restale", !f.isStale());

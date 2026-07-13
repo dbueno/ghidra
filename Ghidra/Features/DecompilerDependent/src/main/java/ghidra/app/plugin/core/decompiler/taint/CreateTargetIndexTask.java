@@ -16,11 +16,17 @@
 package ghidra.app.plugin.core.decompiler.taint;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import docking.widgets.filechooser.GhidraFileChooser;
 import docking.widgets.filechooser.GhidraFileChooserMode;
+import ghidra.app.plugin.core.decompiler.taint.ctadl.CTADLTaintState;
 import ghidra.app.plugin.core.decompiler.taint.ctadl.NativeCtadlRunner;
+import ghidra.app.plugin.core.decompiler.taint.ctadl.model.ModelJsonlWriter;
+import ghidra.app.plugin.core.decompiler.taint.ctadl.model.TaintModel;
 import ghidra.app.services.ConsoleService;
 import ghidra.framework.options.ToolOptions;
 import ghidra.framework.plugintool.PluginTool;
@@ -75,9 +81,49 @@ public class CreateTargetIndexTask extends Task {
 		// index_directory is unused under the native store model.
 		String store = plugin.getOptions().getTaintStoreDirectory();
 		String prog = NativeCtadlRunner.sanitizeName(program.getName());
-		// Propagation (index-time) models come from the models panel; none yet.
-		return NativeCtadlRunner.importAndIndex(engine_path, store, prog, facts_path, null,
-			msg -> plugin.consoleMessage(msg));
+		CTADLTaintState state = plugin.getTaintState() instanceof CTADLTaintState c ? c : null;
+
+		// Propagation (index-time) models authored via the picker are applied here via `-m`.
+		// Only enabled propagation models are emitted; none => null (no `-m` flag).
+		String propagationFile = writePropagationFile(state);
+
+		boolean success = NativeCtadlRunner.importAndIndex(engine_path, store, prog, facts_path,
+			propagationFile, msg -> plugin.consoleMessage(msg));
+
+		if (success && state != null) {
+			// The on-disk index now reflects the current propagation models.
+			state.getIndexFreshness().markIndexed();
+			plugin.refreshTaintModelsPanel();
+		}
+		return success;
+	}
+
+	/**
+	 * Writes the enabled propagation models to a temp JSONL for {@code ctadl index -m}. Returns
+	 * the file path, or null when there are no enabled propagation models (so no `-m` flag).
+	 */
+	private String writePropagationFile(CTADLTaintState state) {
+		if (state == null) {
+			return null;
+		}
+		List<TaintModel> models = state.getAuthoredModels();
+		String jsonl = ModelJsonlWriter.toJsonl(models, TaintModel.Destination.INDEX);
+		if (jsonl.isBlank()) {
+			return null;
+		}
+		try {
+			File f = File.createTempFile("ctadl-propagation", ".jsonl");
+			f.deleteOnExit();
+			Files.writeString(f.toPath(), jsonl);
+			plugin.consoleMessage("Wrote propagation model file (" + jsonl.lines().count() +
+				" model(s)): " + f.getAbsolutePath());
+			return f.getAbsolutePath();
+		}
+		catch (IOException e) {
+			plugin.consoleMessage("Failed to write propagation model file: " + e +
+				" (indexing without propagation models)");
+			return null;
+		}
 	}
 
 	@Override

@@ -531,6 +531,16 @@ public class TaintPlugin extends ProgramPlugin implements TaintService {
 		taintModelPanel.refresh();
 	}
 
+	/**
+	 * Refresh the Taint Models panel (table + index-freshness banner) if it exists, without
+	 * forcing it visible. Safe to call from a background task; the refresh runs on the EDT.
+	 */
+	public void refreshTaintModelsPanel() {
+		if (taintModelPanel != null) {
+			ghidra.util.Swing.runLater(() -> taintModelPanel.refresh());
+		}
+	}
+
 	public TaintOptions getOptions() {
 		return taintProvider.getOptions();
 	}

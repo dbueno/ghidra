@@ -34,6 +34,7 @@ import ghidra.app.plugin.core.decompiler.taint.*;
 import ghidra.app.plugin.core.decompiler.taint.TaintPlugin.TaintDirection;
 import ghidra.app.plugin.core.osgi.BundleHost;
 import ghidra.app.script.*;
+import ghidra.app.plugin.core.decompiler.taint.ctadl.model.IndexFreshness;
 import ghidra.app.plugin.core.decompiler.taint.ctadl.model.TaintModel;
 import ghidra.app.services.ConsoleService;
 import ghidra.framework.plugintool.PluginTool;
@@ -53,6 +54,20 @@ public class CTADLTaintState extends AbstractTaintState {
 	 * this is the seed of the models set the manager panel will own.
 	 */
 	private final List<TaintModel> authoredModels = new ArrayList<>();
+
+	/**
+	 * Tracks whether the on-disk index reflects the current propagation models. Propagation
+	 * models are applied at index time ({@code ctadl index -m}), so changing them (add, toggle,
+	 * delete) marks the index stale until {@link #getIndexFreshness()}.{@code markIndexed()} is
+	 * called after a successful re-index (see {@code CreateTargetIndexTask}). Source/sink models
+	 * are query-time and never affect freshness.
+	 */
+	private final IndexFreshness indexFreshness = new IndexFreshness();
+
+	/** Shown when a propagation-model change requires re-running the index to take effect. */
+	public static final String REINDEX_WARNING =
+		"Propagation models are applied when the program index is built.\n" +
+			"Re-run 'Initialize Program Index' (Create Index) for this change to take effect.";
 
 	public CTADLTaintState(TaintPlugin plugin) {
 		super(plugin);
@@ -355,11 +370,24 @@ public class CTADLTaintState extends AbstractTaintState {
 	/** Adds picker-authored models (see {@link TaintModelDialog}) to this state's model set. */
 	public void addModels(List<TaintModel> models) {
 		authoredModels.addAll(models);
+		// A newly added propagation model invalidates the current index.
+		for (TaintModel m : models) {
+			indexFreshness.onModelChanged(m);
+		}
 	}
 
 	/** The picker-authored models currently held by this state. */
 	public List<TaintModel> getAuthoredModels() {
 		return authoredModels;
+	}
+
+	/**
+	 * Index freshness tracker for propagation (index-time) models. Callers mark it stale via
+	 * {@link IndexFreshness#onModelChanged} on a model edit and {@link IndexFreshness#markIndexed}
+	 * after a successful re-index.
+	 */
+	public IndexFreshness getIndexFreshness() {
+		return indexFreshness;
 	}
 
 	// The parent's per-mark line hooks are unused: writeQueryFile above emits a
