@@ -46,12 +46,18 @@ public class TaintModelDialog extends DialogComponentProvider {
 		final JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
 		final JComboBox<String> in;
 		final JComboBox<String> out;
+		// The ports backing each dropdown (parallel to the choices minus NONE). The input list
+		// excludes the return value, so a selection is mapped back through its own list.
+		final List<PortOption> inPorts;
+		final List<PortOption> outPorts;
 		final GCheckBox inDeref = new GCheckBox(".deref");
 		final GCheckBox outDeref = new GCheckBox(".deref");
 
-		PropRow(String[] choices) {
-			in = new JComboBox<>(choices);
-			out = new JComboBox<>(choices);
+		PropRow(List<PortOption> inPorts, List<PortOption> outPorts) {
+			this.inPorts = inPorts;
+			this.outPorts = outPorts;
+			in = new JComboBox<>(choicesFor(inPorts));
+			out = new JComboBox<>(choicesFor(outPorts));
 			inDeref.setSelected(true);
 			outDeref.setSelected(true);
 			JButton remove = new JButton("Remove");
@@ -75,6 +81,7 @@ public class TaintModelDialog extends DialogComponentProvider {
 		addOKButton();
 		addCancelButton();
 		setOkButtonText("Add model");
+		setResizable(true);
 	}
 
 	@SuppressWarnings("unchecked")
@@ -136,7 +143,7 @@ public class TaintModelDialog extends DialogComponentProvider {
 		JScrollPane sp = new JScrollPane(propRowsPanel,
 			ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
 			ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
-		sp.setPreferredSize(new Dimension(620, 86));
+		sp.setPreferredSize(new Dimension(620, 64));
 		sp.setBorder(BorderFactory.createEmptyBorder());
 		prop.add(sp, BorderLayout.CENTER);
 
@@ -149,22 +156,45 @@ public class TaintModelDialog extends DialogComponentProvider {
 
 		// Start with no propagation rows — propagation is opt-in via "+ Add pair".
 
-		int height = 40 + (n + 1) * 30 + 150;
-		panel.setPreferredSize(new Dimension(660, height));
+		// Let the layout compute the height so the Sources / Sinks grid always gets the room its
+		// rows need (never cramped) and no empty vertical gap is created; the grid's own preferred
+		// width already fits the longest label, so we only floor and cap the width. The dialog is
+		// resizable, so a pathological signature can still be widened by hand.
+		Dimension natural = panel.getPreferredSize();
+		int width = Math.min(1040, Math.max(620, natural.width));
+		panel.setPreferredSize(new Dimension(width, natural.height));
 		return panel;
 	}
 
-	private String[] propChoices() {
-		String[] ch = new String[ports.size() + 1];
+	/**
+	 * Dropdown labels for a propagation port list: {@code NONE} plus each port's analyst-facing
+	 * name (e.g. "src", "param_1", "return") rather than the raw CTADL syntax ("Argument(0)"). The
+	 * per-side {@code .deref} checkbox applies the C-style "*"; a selection is mapped back to its
+	 * port through the same list, so friendlier labels are safe.
+	 */
+	private String[] choicesFor(List<PortOption> ps) {
+		String[] ch = new String[ps.size() + 1];
 		ch[0] = NONE;
-		for (int i = 0; i < ports.size(); i++) {
-			ch[i + 1] = ports.get(i).basePort();
+		for (int i = 0; i < ps.size(); i++) {
+			ch[i + 1] = ps.get(i).displayName();
 		}
 		return ch;
 	}
 
+	/** Ports eligible as a propagation <em>input</em>: everything except the return value. */
+	private List<PortOption> inputPorts() {
+		List<PortOption> in = new ArrayList<>();
+		for (PortOption p : ports) {
+			if (!"Return".equals(p.basePort())) {
+				in.add(p);
+			}
+		}
+		return in;
+	}
+
 	private void addPropRow() {
-		PropRow row = new PropRow(propChoices());
+		// Input excludes the return (a return can't be a propagation source); output allows it.
+		PropRow row = new PropRow(inputPorts(), ports);
 		propRows.add(row);
 		propRowsPanel.add(row.panel);
 		propRowsPanel.revalidate();
@@ -220,10 +250,12 @@ public class TaintModelDialog extends DialogComponentProvider {
 			int inIdx = row.in.getSelectedIndex();
 			int outIdx = row.out.getSelectedIndex();
 			if (inIdx > 0 && outIdx > 0) {
-				String in = ports.get(inIdx - 1).portString(row.inDeref.isSelected());
-				String out = ports.get(outIdx - 1).portString(row.outDeref.isSelected());
-				String inDisp = ports.get(inIdx - 1).displayPort(row.inDeref.isSelected());
-				String outDisp = ports.get(outIdx - 1).displayPort(row.outDeref.isSelected());
+				PortOption ip = row.inPorts.get(inIdx - 1);
+				PortOption op = row.outPorts.get(outIdx - 1);
+				String in = ip.portString(row.inDeref.isSelected());
+				String out = op.portString(row.outDeref.isSelected());
+				String inDisp = ip.displayPort(row.inDeref.isSelected());
+				String outDisp = op.displayPort(row.outDeref.isSelected());
 				result.add(TaintModel.propagation(fn, in, out, inDisp, outDisp));
 			}
 		}
