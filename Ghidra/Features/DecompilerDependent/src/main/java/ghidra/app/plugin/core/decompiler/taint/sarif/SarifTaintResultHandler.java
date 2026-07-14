@@ -170,8 +170,8 @@ public class SarifTaintResultHandler extends SarifResultHandler {
 		provider.addLocalAction(byVarnode);
 
 		// Scope control replaces the old "Apply all": a toolbar dropdown that applies only the
-		// SARIF rows matching the chosen HighlightScope (Paths / All tainted / Sources/Sinks),
-		// so a focused source→sink query no longer paints every downstream tainted instruction.
+		// SARIF rows matching the chosen HighlightScope (Paths / All tainted), so a focused
+		// source→sink query no longer paints every downstream tainted instruction.
 		provider.addLocalAction(new ApplyScopeAction(provider));
 
 		DockingAction clearTaint = new DockingAction("Clear taint", getKey()) {

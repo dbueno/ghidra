@@ -1,5 +1,12 @@
 package ghidra.app.plugin.core.decompiler.taint.ctadl.model;
 import java.util.ArrayList;import java.util.List;
+/**
+ * Encodes/decodes the authored taint models for plugin config-state persistence. One model per
+ * line; fields joined by the ASCII unit-separator (US, {@code }); the {@code functionNames}
+ * field is comma-joined within its US field. This minimal format assumes model values contain
+ * none of those delimiters: CTADL/C function names and ports carry no comma, US, or newline. If
+ * the authoring path ever admits such names, switch to an escaped or JSON encoding.
+ */
 public final class TaintModelCodec {
   private TaintModelCodec(){}
   private static final String US = "";

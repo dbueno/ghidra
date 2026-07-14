@@ -21,6 +21,7 @@ public class PortOptionTest {
     // 3-arg ctor still works, displayName falls back to basePort:
     PortOption legacy = new PortOption("arg0: int n", "Argument(0)", false);
     check("legacy displayName == basePort", legacy.displayName().equals("Argument(0)"));
+    check("legacy displayPort plain == basePort", legacy.displayPort(false).equals("Argument(0)"));
     if(fails>0) System.exit(1);
   }
 }
