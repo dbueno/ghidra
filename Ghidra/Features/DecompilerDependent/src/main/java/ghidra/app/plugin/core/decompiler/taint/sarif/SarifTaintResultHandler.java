@@ -20,8 +20,13 @@ import java.util.Map.Entry;
 
 import com.contrastsecurity.sarif.*;
 
+import javax.swing.Icon;
+
 import docking.ActionContext;
 import docking.action.*;
+import docking.menu.ActionState;
+import docking.menu.MultiStateDockingAction;
+import docking.widgets.EventTrigger;
 import ghidra.app.plugin.core.decompiler.taint.*;
 import ghidra.app.plugin.core.decompiler.taint.TaintState.TaskType;
 import ghidra.framework.plugintool.PluginTool;
@@ -64,6 +69,9 @@ public class SarifTaintResultHandler extends SarifResultHandler {
 		if (ruleId == null || ruleId.startsWith("C0001")) {
 			return;
 		}
+		// Retain the raw rule-ID so a scoped apply (HighlightScope) can filter rows by rule
+		// family; the code-flow handler already stores "RuleId" for its C0001 path rows.
+		map.put("RuleId", ruleId);
 		map.put("type", TaintRule.fromRuleId(ruleId));
 		Message msg = result.getMessage();
 		map.put("comment", msg.getText());
@@ -161,26 +169,10 @@ public class SarifTaintResultHandler extends SarifResultHandler {
 		byVarnode.setPopupMenuData(new MenuData(new String[] { getActionName() }));
 		provider.addLocalAction(byVarnode);
 
-		DockingAction applyAll = new DockingAction("Apply all", getKey()) {
-			@Override
-			public void actionPerformed(ActionContext context) {
-				provider.filterTable.getTable().selectAll();
-				TaskLauncher.launch(new ApplyTaintViaVarnodesTask(provider));
-			}
-
-			@Override
-			public boolean isEnabledForContext(ActionContext context) {
-				return isEnabled;
-			}
-
-			@Override
-			public boolean isAddToPopup(ActionContext context) {
-				return isEnabled;
-			}
-		};
-		applyAll.setDescription("Apply all");
-		applyAll.setToolBarData(new ToolBarData(Icons.EXPAND_ALL_ICON));
-		provider.addLocalAction(applyAll);
+		// Scope control replaces the old "Apply all": a toolbar dropdown that applies only the
+		// SARIF rows matching the chosen HighlightScope (Paths / All tainted / Sources/Sinks),
+		// so a focused source→sink query no longer paints every downstream tainted instruction.
+		provider.addLocalAction(new ApplyScopeAction(provider));
 
 		DockingAction clearTaint = new DockingAction("Clear taint", getKey()) {
 			@Override
@@ -207,20 +199,31 @@ public class SarifTaintResultHandler extends SarifResultHandler {
 
 		private SarifResultsTableProvider tableProvider;
 		protected TaskType taskType = TaskType.SET_TAINT;
+		// null => apply the table's currently-selected rows (per-row "Apply taint"); non-null =>
+		// scan all rows and apply only those whose rule-ID is in the scope.
+		private final HighlightScope scope;
 
 		protected ApplyTaintViaVarnodesTask(SarifResultsTableProvider provider) {
+			this(provider, null);
+		}
+
+		protected ApplyTaintViaVarnodesTask(SarifResultsTableProvider provider,
+				HighlightScope scope) {
 			super(provider.getController().getProgram(), "ApplyTaintViaVarnodesTask", true, true,
 				true);
 			this.tableProvider = provider;
+			this.scope = scope;
 		}
 
 		@Override
 		protected void doRun(TaskMonitor monitor) {
-			int[] selected = tableProvider.filterTable.getTable().getSelectedRows();
 			Map<Address, Set<TaintQueryResult>> map = new HashMap<>();
 			AddressSet set = new AddressSet();
-			for (int row : selected) {
+			for (int row : rowsToApply()) {
 				Map<String, Object> r = tableProvider.getRow(row);
+				if (scope != null && !scope.matches((String) r.get("RuleId"))) {
+					continue;
+				}
 				String kind = (String) r.get("kind");
 				if (kind == null) {
 					continue;
@@ -243,6 +246,22 @@ public class SarifTaintResultHandler extends SarifResultHandler {
 				service.setVarnodeMap(map, true, taskType);
 				service.setAddressSet(set, false);
 			}
+		}
+
+		/**
+		 * Rows to consider: a scoped apply scans every row (filtered by rule-ID in {@link #doRun});
+		 * an unscoped apply uses the table's current selection.
+		 */
+		private int[] rowsToApply() {
+			if (scope == null) {
+				return tableProvider.filterTable.getTable().getSelectedRows();
+			}
+			int n = tableProvider.filterTable.getTable().getRowCount();
+			int[] all = new int[n];
+			for (int i = 0; i < n; i++) {
+				all[i] = i;
+			}
+			return all;
 		}
 
 		private void getTaintedVariable(Map<Address, Set<TaintQueryResult>> map,
@@ -284,6 +303,43 @@ public class SarifTaintResultHandler extends SarifResultHandler {
 			return vset;
 		}
 
+	}
+
+	/**
+	 * Toolbar dropdown that applies the taint highlight at a chosen {@link HighlightScope}.
+	 * Selecting a scope re-applies from the already-loaded SARIF (no re-query). The initial
+	 * state is {@code PATHS} but nothing is applied until the analyst picks a scope (the
+	 * {@code ready} guard suppresses the state-change callback fired during construction).
+	 */
+	private class ApplyScopeAction extends MultiStateDockingAction<HighlightScope> {
+
+		private final SarifResultsTableProvider prov;
+		private boolean ready = false;
+
+		ApplyScopeAction(SarifResultsTableProvider prov) {
+			super("Apply taint highlight", getKey());
+			this.prov = prov;
+			setEnabled(isEnabled);
+			for (HighlightScope hs : HighlightScope.values()) {
+				addActionState(new ActionState<>("Apply " + hs.label(), iconFor(hs), hs));
+			}
+			setCurrentActionStateByUserData(HighlightScope.PATHS);
+			ready = true;
+		}
+
+		@Override
+		public void actionStateChanged(ActionState<HighlightScope> newState, EventTrigger trigger) {
+			if (ready && isEnabled) {
+				TaskLauncher.launch(new ApplyTaintViaVarnodesTask(prov, newState.getUserData()));
+			}
+		}
+	}
+
+	private static Icon iconFor(HighlightScope scope) {
+		return switch (scope) {
+			case PATHS -> Icons.EXPAND_ALL_ICON;
+			case ALL_TAINTED -> Icons.COLLAPSE_ALL_ICON;
+		};
 	}
 
 	private class ClearTaintTask extends ProgramTask {
