@@ -20,7 +20,9 @@ import java.io.FileInputStream;
 import java.io.PrintWriter;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -99,43 +101,7 @@ public class CTADLTaintState extends AbstractTaintState {
 
 		taintOptions = plugin.getOptions();
 		try {
-			File engineFile = Path.of(taintOptions.getTaintEnginePath()).toFile();
-			if (!engineFile.exists()) {
-				plugin.consoleMessage("The " + getName() + " binary (" +
-					engineFile.getCanonicalPath() + ") cannot be found; set Taint.Directories.Engine.");
-				return false;
-			}
-
 			String outputDir = taintOptions.getTaintOutputDirectory();
-			String store = taintOptions.getTaintStoreDirectory();
-			String prog = NativeCtadlRunner.sanitizeName(program.getName());
-
-			// Pre-flight: a query needs an on-disk index for this program. If it is missing, offer
-			// to build it now instead of failing later with an opaque "No SARIF generated" error.
-			if (!isIndexed(store, prog)) {
-				int choice = OptionDialog.showYesNoDialog(tool.getActiveWindow(),
-					"Program not indexed",
-					"'" + program.getName() + "' has not been indexed yet, so there is nothing to " +
-						"query.\n\nRun 'Initialize Program Index' now, then continue the query?");
-				if (choice != OptionDialog.YES_OPTION) {
-					plugin.consoleMessage(
-						"Query skipped: '" + program.getName() + "' is not indexed.");
-					return false;
-				}
-				try {
-					// Reuse the full index flow (facts import + index, propagation models, freshness).
-					new CreateTargetIndexTask(plugin, program).run(monitor);
-				}
-				catch (CancelledException e) {
-					plugin.consoleMessage("Indexing cancelled; query skipped.");
-					return false;
-				}
-				if (!isIndexed(store, prog)) {
-					plugin.consoleMessage("Indexing did not complete; query skipped. " +
-						"Check the engine, facts, and store settings.");
-					return false;
-				}
-			}
 
 			// Resolve the source/sink model file for this query.
 			File queryFile;
@@ -155,26 +121,108 @@ public class CTADLTaintState extends AbstractTaintState {
 				writeQueryFile(queryFile);
 			}
 
-			File outSarif = Path.of(outputDir, prog + ".sarif").toFile();
-			plugin.consoleMessage("Using " + getName() + " binary: " + engineFile);
-
-			boolean ok = NativeCtadlRunner.query(engineFile.toString(), store, prog,
-				queryFile.getAbsolutePath(), outSarif.getAbsolutePath(),
-				msg -> plugin.consoleMessage(msg));
-			if (!ok) {
-				plugin.consoleMessage(getName() + " query did not complete successfully.");
-				return false;
-			}
-
-			try (FileInputStream fis = new FileInputStream(outSarif)) {
-				readQueryResultsIntoDataFrame(program, fis);
-			}
-			return true;
+			return runNativeQuery(program, tool, queryFile);
 		}
 		catch (Exception e) {
 			Msg.error(this, "Problems running query: " + e);
 			return false;
 		}
+	}
+
+	/**
+	 * Runs a <b>forward-exploration</b> query: seeds the enabled source(s) and pairs them with a
+	 * synthetic catch-all sink so the engine's meet-in-the-middle materializes each source's full
+	 * forward taint cone (see {@link #writeExplorationQueryFile}). No sink authoring is required.
+	 * Results surface as {@code C0002} tainted-instructions — apply the "All tainted" highlight
+	 * scope to see the cone. Returns false (with a warning) if there is no enabled source to explore.
+	 */
+	public boolean queryForwardExploration(Program program, PluginTool tool) {
+		taintOptions = plugin.getOptions();
+		try {
+			File queryFile = Path.of(taintOptions.getTaintOutputDirectory(),
+				"ctadl-explore-" + NativeCtadlRunner.sanitizeName(program.getName()) + ".json")
+					.toFile();
+			if (!writeExplorationQueryFile(queryFile)) {
+				Msg.showWarn(this, tool.getActiveWindow(), getName() + " Exploration",
+					"No enabled source to explore. Author at least one source model (or mark a " +
+						"source), then retry.");
+				return false;
+			}
+			boolean ok = runNativeQuery(program, tool, queryFile);
+			if (ok) {
+				plugin.consoleMessage("Forward exploration complete — apply the 'All tainted' " +
+					"highlight scope to see where taint flows from your source(s).");
+			}
+			return ok;
+		}
+		catch (Exception e) {
+			Msg.error(this, "Problems running exploration query: " + e);
+			return false;
+		}
+	}
+
+	/**
+	 * Shared native-query core used by the source/sink query ({@link #queryIndex}) and forward
+	 * exploration ({@link #queryForwardExploration}): resolve the engine, ensure the program is
+	 * indexed (offering to index if not), run
+	 * {@code ctadl query <prog> -m <queryFile> -o <sarif> --sarif-profile debug}, then load the
+	 * resulting SARIF into the data frame.
+	 */
+	private boolean runNativeQuery(Program program, PluginTool tool, File queryFile) throws Exception {
+		taintOptions = plugin.getOptions();
+		File engineFile = Path.of(taintOptions.getTaintEnginePath()).toFile();
+		if (!engineFile.exists()) {
+			plugin.consoleMessage("The " + getName() + " binary (" +
+				engineFile.getCanonicalPath() + ") cannot be found; set Taint.Directories.Engine.");
+			return false;
+		}
+
+		String outputDir = taintOptions.getTaintOutputDirectory();
+		String store = taintOptions.getTaintStoreDirectory();
+		String prog = NativeCtadlRunner.sanitizeName(program.getName());
+
+		// Pre-flight: a query needs an on-disk index for this program. If it is missing, offer
+		// to build it now instead of failing later with an opaque "No SARIF generated" error.
+		if (!isIndexed(store, prog)) {
+			int choice = OptionDialog.showYesNoDialog(tool.getActiveWindow(),
+				"Program not indexed",
+				"'" + program.getName() + "' has not been indexed yet, so there is nothing to " +
+					"query.\n\nRun 'Initialize Program Index' now, then continue the query?");
+			if (choice != OptionDialog.YES_OPTION) {
+				plugin.consoleMessage(
+					"Query skipped: '" + program.getName() + "' is not indexed.");
+				return false;
+			}
+			try {
+				// Reuse the full index flow (facts import + index, propagation models, freshness).
+				new CreateTargetIndexTask(plugin, program).run(monitor);
+			}
+			catch (CancelledException e) {
+				plugin.consoleMessage("Indexing cancelled; query skipped.");
+				return false;
+			}
+			if (!isIndexed(store, prog)) {
+				plugin.consoleMessage("Indexing did not complete; query skipped. " +
+					"Check the engine, facts, and store settings.");
+				return false;
+			}
+		}
+
+		File outSarif = Path.of(outputDir, prog + ".sarif").toFile();
+		plugin.consoleMessage("Using " + getName() + " binary: " + engineFile);
+
+		boolean ok = NativeCtadlRunner.query(engineFile.toString(), store, prog,
+			queryFile.getAbsolutePath(), outSarif.getAbsolutePath(),
+			msg -> plugin.consoleMessage(msg));
+		if (!ok) {
+			plugin.consoleMessage(getName() + " query did not complete successfully.");
+			return false;
+		}
+
+		try (FileInputStream fis = new FileInputStream(outSarif)) {
+			readQueryResultsIntoDataFrame(program, fis);
+		}
+		return true;
 	}
 
 	/**
@@ -290,15 +338,10 @@ public class CTADLTaintState extends AbstractTaintState {
 	public boolean writeQueryFile(File queryTextFile) throws Exception {
 		JsonArray generators = new JsonArray();
 
-		for (TaintLabel mark : sources) {
-			if (mark.isActive()) {
-				JsonObject gen = buildGenerator(mark, true);
-				if (gen != null) {
-					generators.add(gen);
-				}
-			}
-		}
+		// Sources: active marks + enabled authored source models.
+		appendSourceGenerators(generators);
 
+		// Sinks: active marks.
 		for (TaintLabel mark : sinks) {
 			if (mark.isActive()) {
 				JsonObject gen = buildGenerator(mark, false);
@@ -316,19 +359,68 @@ public class CTADLTaintState extends AbstractTaintState {
 			}
 		}
 
-		// Function-centric models authored via the picker (source/sink only; propagation
-		// models are index-time and are applied during Create Index, not here). Only
-		// enabled models (see the Taint Models panel) contribute to the query.
+		// Enabled authored sink models (source models are added by appendSourceGenerators;
+		// propagation models are index-time and applied during Create Index, not here).
 		for (TaintModel m : authoredModels) {
-			if (!m.enabled()) {
-				continue;
-			}
-			JsonObject gen = taintModelToGenerator(m);
-			if (gen != null) {
-				generators.add(gen);
+			if (m.enabled() && m.role() == TaintModel.Role.SINK) {
+				JsonObject gen = taintModelToGenerator(m);
+				if (gen != null) {
+					generators.add(gen);
+				}
 			}
 		}
 
+		writeGenerators(generators, queryTextFile);
+		return true;
+	}
+
+	/**
+	 * Writes the forward-<b>exploration</b> query: the enabled source generators plus one synthetic
+	 * catch-all sink (every function with code, sinks on {@code Argument(0..N)}) per distinct source
+	 * kind. Making the whole program a sink turns the engine's backward cone into "everything," so
+	 * the meet-in-the-middle materializes the source's full forward cone (reported as {@code C0002}
+	 * tainted-instructions). Authored/interior sinks and propagation models are intentionally
+	 * omitted. Returns false when there is no enabled source to explore (nothing written).
+	 */
+	public boolean writeExplorationQueryFile(File queryTextFile) throws Exception {
+		Set<String> kinds = enabledSourceKinds();
+		if (kinds.isEmpty()) {
+			return false;
+		}
+		JsonArray generators = new JsonArray();
+		appendSourceGenerators(generators);
+		generators.add(catchAllSinkGenerator(kinds));
+		writeGenerators(generators, queryTextFile);
+		return true;
+	}
+
+	/**
+	 * Appends the enabled source generators — active source marks and enabled authored
+	 * {@link TaintModel.Role#SOURCE} models — to {@code generators}. Shared by the normal
+	 * source/sink query ({@link #writeQueryFile}) and forward exploration
+	 * ({@link #writeExplorationQueryFile}).
+	 */
+	private void appendSourceGenerators(JsonArray generators) {
+		for (TaintLabel mark : sources) {
+			if (mark.isActive()) {
+				JsonObject gen = buildGenerator(mark, true);
+				if (gen != null) {
+					generators.add(gen);
+				}
+			}
+		}
+		for (TaintModel m : authoredModels) {
+			if (m.enabled() && m.role() == TaintModel.Role.SOURCE) {
+				JsonObject gen = taintModelToGenerator(m);
+				if (gen != null) {
+					generators.add(gen);
+				}
+			}
+		}
+	}
+
+	/** Serializes {@code generators} as the engine's {@code {model_generators:[...]}} document. */
+	private void writeGenerators(JsonArray generators, File queryTextFile) throws Exception {
 		JsonObject root = new JsonObject();
 		root.add("model_generators", generators);
 
@@ -336,9 +428,7 @@ public class CTADLTaintState extends AbstractTaintState {
 		try (PrintWriter writer = new PrintWriter(queryTextFile)) {
 			writer.println(gson.toJson(root));
 		}
-
 		plugin.consoleMessage("Wrote Query File: " + queryTextFile);
-		return true;
 	}
 
 	/**
@@ -415,6 +505,66 @@ public class CTADLTaintState extends AbstractTaintState {
 		endpoints.add(endpoint);
 		JsonObject model = new JsonObject();
 		model.add(m.role() == TaintModel.Role.SOURCE ? "sources" : "sinks", endpoints);
+
+		JsonObject gen = new JsonObject();
+		gen.addProperty("find", "methods");
+		gen.add("where", where);
+		gen.add("model", model);
+		return gen;
+	}
+
+	/** Argument ports {@code 0..EXPLORE_MAX_ARG} used for the exploration catch-all sink. */
+	private static final int EXPLORE_MAX_ARG = 15;
+
+	/**
+	 * The distinct taint kinds of the currently enabled sources (active source marks + enabled
+	 * authored source models). Used to pair the exploration catch-all sink with the right kind(s);
+	 * order-preserving so the emitted model is stable.
+	 */
+	private Set<String> enabledSourceKinds() {
+		Set<String> kinds = new LinkedHashSet<>();
+		for (TaintLabel mark : sources) {
+			if (mark.isActive() && mark.getLabel() != null) {
+				kinds.add(mark.getLabel());
+			}
+		}
+		for (TaintModel m : authoredModels) {
+			if (m.enabled() && m.role() == TaintModel.Role.SOURCE && m.kind() != null) {
+				kinds.add(m.kind());
+			}
+		}
+		return kinds;
+	}
+
+	/** True if there is an active source mark or enabled authored source model to explore. */
+	public boolean hasEnabledSource() {
+		return !enabledSourceKinds().isEmpty();
+	}
+
+	/**
+	 * Builds the synthetic catch-all sink generator for forward exploration: every function with a
+	 * body ({@code has_code}) is a sink on {@code Argument(0..EXPLORE_MAX_ARG)}, one endpoint per
+	 * distinct source {@code kind}. This makes the engine's backward cone cover the whole program so
+	 * the source's forward cone is fully materialized. (An engine-native forward slice would replace
+	 * this; {@code --compute-slices} is currently a no-op — see the Denis findings doc.)
+	 */
+	private JsonObject catchAllSinkGenerator(Set<String> kinds) {
+		JsonArray where = new JsonArray();
+		JsonObject hasCode = new JsonObject();
+		hasCode.addProperty("constraint", "has_code");
+		where.add(hasCode);
+
+		JsonArray sinks = new JsonArray();
+		for (String kind : kinds) {
+			for (int i = 0; i <= EXPLORE_MAX_ARG; i++) {
+				JsonObject ep = new JsonObject();
+				ep.addProperty("port", "Argument(" + i + ")");
+				ep.addProperty("kind", kind);
+				sinks.add(ep);
+			}
+		}
+		JsonObject model = new JsonObject();
+		model.add("sinks", sinks);
 
 		JsonObject gen = new JsonObject();
 		gen.addProperty("find", "methods");
