@@ -15,16 +15,23 @@ import javax.swing.table.AbstractTableModel;
 
 import docking.ActionContext;
 import docking.action.DockingAction;
+import docking.action.MenuData;
 import docking.action.ToolBarData;
 import docking.widgets.table.GTable;
 import ghidra.app.plugin.core.decompiler.taint.TaintPlugin;
+import ghidra.app.plugin.core.decompiler.taint.TaintPlugin.TaintFormat;
 import ghidra.app.plugin.core.decompiler.taint.TaintState;
 import ghidra.app.plugin.core.decompiler.taint.ctadl.model.TaintModel;
+import ghidra.app.plugin.core.decompiler.taint.sarif.SarifTaintGraphRunHandler;
 import ghidra.framework.plugintool.ComponentProviderAdapter;
+import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
+import ghidra.util.task.Task;
+import ghidra.util.task.TaskMonitor;
 import resources.Icons;
+import sarif.SarifService;
 
 /**
  * Dockable manager for the function-centric taint models authored via {@link TaintModelDialog}.
@@ -105,8 +112,74 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 			}
 		};
 		delete.setToolBarData(new ToolBarData(Icons.DELETE_ICON));
-		delete.setPopupMenuData(new docking.action.MenuData(new String[] { "Delete model" }));
+		delete.setPopupMenuData(new MenuData(new String[] { "Delete model" }));
 		addLocalAction(delete);
+
+		// Forward taint exploration: runs the enabled source model(s) against a synthetic
+		// catch-all sink so the source's forward cone is highlighted. It operates on the whole
+		// enabled-model set (not a decompiler cursor position), so it belongs on this panel's
+		// toolbar rather than the context menu.
+		DockingAction explore = new DockingAction("Explore Forward Taint", plugin.getName()) {
+			@Override
+			public void actionPerformed(ActionContext context) {
+				runExploration();
+			}
+
+			@Override
+			public boolean isEnabledForContext(ActionContext context) {
+				CTADLTaintState state = currentState();
+				return state != null && state.hasEnabledSource();
+			}
+		};
+		explore.setToolBarData(new ToolBarData(Icons.ARROW_DOWN_RIGHT_ICON));
+		explore.setPopupMenuData(new MenuData(new String[] { "Explore forward taint" }));
+		explore.setDescription("Run a forward taint exploration from the enabled source model(s): " +
+			"pairs them with a catch-all sink so the source's forward cone is computed. Apply the " +
+			"'All tainted' highlight scope to see it.");
+		addLocalAction(explore);
+	}
+
+	/**
+	 * Runs a forward taint exploration from the currently enabled sources and displays the result,
+	 * mirroring the query actions' task &rarr; showSarif &rarr; setTaint flow. The exploration query
+	 * itself lives in {@link CTADLTaintState#queryForwardExploration}. Unlike the decompiler query
+	 * actions this is model-set-wide, not tied to the cursor — hence its home on this panel.
+	 */
+	private void runExploration() {
+		CTADLTaintState state = currentState();
+		if (state == null) {
+			return;
+		}
+		Program program = plugin.getCurrentProgram();
+		if (program == null) {
+			Msg.showWarn(this, null, "No program", "Open a program before exploring taint.");
+			return;
+		}
+		PluginTool tool = plugin.getTool();
+
+		Task task = new Task("Forward taint exploration", true, true, true, true) {
+			@Override
+			public void run(TaskMonitor monitor) {
+				state.setMonitor(monitor);
+				state.queryForwardExploration(program, tool);
+				state.setMonitor(null);
+			}
+		};
+		tool.execute(task);
+
+		if (task.isCancelled()) {
+			plugin.consoleMessage("Forward taint exploration was cancelled.");
+			return;
+		}
+		TaintFormat format = state.getOptions().getTaintOutputForm();
+		if (!format.equals(TaintFormat.NONE)) {
+			SarifService sarifService = plugin.getSarifService();
+			sarifService.getController().setDefaultGraphHander(SarifTaintGraphRunHandler.class);
+			String queryName = state.getQueryName();
+			sarifService.showSarif(queryName != null ? queryName : "explore", state.getData());
+		}
+		plugin.getProvider().setTaint();
+		plugin.consoleMessage("exploration query complete");
 	}
 
 	/**

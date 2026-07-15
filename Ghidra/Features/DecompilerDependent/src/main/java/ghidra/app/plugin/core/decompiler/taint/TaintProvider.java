@@ -131,10 +131,6 @@ public class TaintProvider extends ComponentProviderAdapter implements OptionsCh
 		TaintModelFromFunctionAction taintModelAction = new TaintModelFromFunctionAction(plugin);
 		setGroupInfo(taintModelAction, variableGroup, subGroupPosition++);
 
-		TaintExploreFromSourceAction taintExploreAction =
-			new TaintExploreFromSourceAction(plugin);
-		setGroupInfo(taintExploreAction, variableGroup, subGroupPosition++);
-
 		// These actions have an icon and a drop-down menu option in the decompiler window.
 		TaintQueryAction taintQueryAction = new TaintQueryAction(plugin);
 		TaintQueryDefaultAction taintQueryDefaultAction =
@@ -185,7 +181,6 @@ public class TaintProvider extends ComponentProviderAdapter implements OptionsCh
 		provider.addLocalAction(taintClearAction);
 		provider.addLocalAction(taintSizeAction);
 		provider.addLocalAction(taintModelAction);
-		provider.addLocalAction(taintExploreAction);
 	}
 
 	/**
