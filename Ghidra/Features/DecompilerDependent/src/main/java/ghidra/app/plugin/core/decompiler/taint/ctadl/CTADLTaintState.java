@@ -121,7 +121,7 @@ public class CTADLTaintState extends AbstractTaintState {
 				writeQueryFile(queryFile);
 			}
 
-			return runNativeQuery(program, tool, queryFile);
+			return runNativeQuery(program, tool, queryFile, false);
 		}
 		catch (Exception e) {
 			Msg.error(this, "Problems running query: " + e);
@@ -148,7 +148,7 @@ public class CTADLTaintState extends AbstractTaintState {
 						"source), then retry.");
 				return false;
 			}
-			boolean ok = runNativeQuery(program, tool, queryFile);
+			boolean ok = runNativeQuery(program, tool, queryFile, true);
 			if (ok) {
 				plugin.consoleMessage("Forward exploration complete — apply the 'All tainted' " +
 					"highlight scope to see where taint flows from your source(s).");
@@ -166,9 +166,13 @@ public class CTADLTaintState extends AbstractTaintState {
 	 * exploration ({@link #queryForwardExploration}): resolve the engine, ensure the program is
 	 * indexed (offering to index if not), run
 	 * {@code ctadl query <prog> -m <queryFile> -o <sarif> --sarif-profile debug}, then load the
-	 * resulting SARIF into the data frame.
+	 * resulting SARIF into the data frame. {@code exploration} selects a distinct output SARIF
+	 * name ({@code <prog>-explore.sarif}) so a forward-exploration run never overwrites the normal
+	 * source/sink query's {@code <prog>.sarif} on disk (they are read back immediately either way,
+	 * but keeping the files separate avoids stale/ambiguous artifacts for external tooling).
 	 */
-	private boolean runNativeQuery(Program program, PluginTool tool, File queryFile) throws Exception {
+	private boolean runNativeQuery(Program program, PluginTool tool, File queryFile,
+			boolean exploration) throws Exception {
 		taintOptions = plugin.getOptions();
 		File engineFile = Path.of(taintOptions.getTaintEnginePath()).toFile();
 		if (!engineFile.exists()) {
@@ -208,7 +212,8 @@ public class CTADLTaintState extends AbstractTaintState {
 			}
 		}
 
-		File outSarif = Path.of(outputDir, prog + ".sarif").toFile();
+		File outSarif =
+			Path.of(outputDir, prog + (exploration ? "-explore.sarif" : ".sarif")).toFile();
 		plugin.consoleMessage("Using " + getName() + " binary: " + engineFile);
 
 		boolean ok = NativeCtadlRunner.query(engineFile.toString(), store, prog,
@@ -513,7 +518,14 @@ public class CTADLTaintState extends AbstractTaintState {
 		return gen;
 	}
 
-	/** Argument ports {@code 0..EXPLORE_MAX_ARG} used for the exploration catch-all sink. */
+	/**
+	 * Argument ports {@code 0..EXPLORE_MAX_ARG} used for the exploration catch-all sink. The engine
+	 * has no argument wildcard, so the range is enumerated with a generous fixed bound. Consequence:
+	 * a forward cone that flows <em>only</em> into argument &gt; {@code EXPLORE_MAX_ARG} of some
+	 * function is not captured — exploration is a plugin-side approximation of a forward slice, not a
+	 * complete one (see the Denis findings doc). Functions with &le; 16 parameters (the common case)
+	 * are fully covered.
+	 */
 	private static final int EXPLORE_MAX_ARG = 15;
 
 	/**
@@ -524,6 +536,9 @@ public class CTADLTaintState extends AbstractTaintState {
 	private Set<String> enabledSourceKinds() {
 		Set<String> kinds = new LinkedHashSet<>();
 		for (TaintLabel mark : sources) {
+			// A null-label mark would still be emitted as a source by buildGenerator (with a null
+			// kind), but it gets no matching catch-all sink kind here, so it contributes no forward
+			// cone. Marks normally always carry a label, so this only skips a degenerate source.
 			if (mark.isActive() && mark.getLabel() != null) {
 				kinds.add(mark.getLabel());
 			}

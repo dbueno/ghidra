@@ -103,6 +103,11 @@ public class TaintModelDialog extends DialogComponentProvider {
 		super("Model taint for " + FunctionPortResolver.resolveTarget(function).getName());
 		Function target = FunctionPortResolver.resolveTarget(function);
 		this.functionName = target.getName();
+		// {@code hf} is the decompiler's HighFunction for the original {@code function}. When
+		// {@code function} is a thunk, {@code target} is the thunked destination, so hf technically
+		// belongs to a different function; the inferred-param fallback would then describe the
+		// thunk, not the target. Harmless in practice — committed thunks carry a signature, so the
+		// zero-committed-params fallback branch does not fire here.
 		this.ports = FunctionPortResolver.portsOf(target, hf);
 		addWorkPanel(buildPanel());
 		addOKButton();
