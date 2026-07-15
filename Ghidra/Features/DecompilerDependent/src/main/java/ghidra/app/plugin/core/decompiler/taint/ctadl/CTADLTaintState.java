@@ -121,7 +121,7 @@ public class CTADLTaintState extends AbstractTaintState {
 				writeQueryFile(queryFile);
 			}
 
-			return runNativeQuery(program, tool, queryFile, false);
+			return runNativeQuery(program, tool, queryFile, "");
 		}
 		catch (Exception e) {
 			Msg.error(this, "Problems running query: " + e);
@@ -148,7 +148,7 @@ public class CTADLTaintState extends AbstractTaintState {
 						"source), then retry.");
 				return false;
 			}
-			boolean ok = runNativeQuery(program, tool, queryFile, true);
+			boolean ok = runNativeQuery(program, tool, queryFile, "-explore");
 			if (ok) {
 				plugin.consoleMessage("Forward exploration complete — apply the 'All tainted' " +
 					"highlight scope to see where taint flows from your source(s).");
@@ -162,17 +162,48 @@ public class CTADLTaintState extends AbstractTaintState {
 	}
 
 	/**
+	 * Runs a <b>backward-exploration</b> query: seeds the enabled sink(s) and pairs them with a
+	 * synthetic catch-all source so the engine's meet-in-the-middle materializes each sink's full
+	 * backward taint cone (see {@link #writeBackwardExplorationQueryFile}). No source authoring is
+	 * required. Results surface as {@code C0002} tainted-instructions — apply the "All tainted"
+	 * highlight scope to see the cone. Returns false (with a warning) if there is no enabled sink.
+	 */
+	public boolean queryBackwardExploration(Program program, PluginTool tool) {
+		taintOptions = plugin.getOptions();
+		try {
+			File queryFile = Path.of(taintOptions.getTaintOutputDirectory(),
+				"ctadl-explore-bwd-" + NativeCtadlRunner.sanitizeName(program.getName()) + ".json")
+						.toFile();
+			if (!writeBackwardExplorationQueryFile(queryFile)) {
+				Msg.showWarn(this, tool.getActiveWindow(), getName() + " Exploration",
+					"No enabled sink to explore. Mark a sink (or enable a sink model), then retry.");
+				return false;
+			}
+			boolean ok = runNativeQuery(program, tool, queryFile, "-explore-bwd");
+			if (ok) {
+				plugin.consoleMessage("Backward exploration complete — apply the 'All tainted' " +
+					"highlight scope to see what flows into your sink(s).");
+			}
+			return ok;
+		}
+		catch (Exception e) {
+			Msg.error(this, "Problems running backward exploration query: " + e);
+			return false;
+		}
+	}
+
+	/**
 	 * Shared native-query core used by the source/sink query ({@link #queryIndex}) and forward
 	 * exploration ({@link #queryForwardExploration}): resolve the engine, ensure the program is
 	 * indexed (offering to index if not), run
 	 * {@code ctadl query <prog> -m <queryFile> -o <sarif> --sarif-profile debug}, then load the
-	 * resulting SARIF into the data frame. {@code exploration} selects a distinct output SARIF
-	 * name ({@code <prog>-explore.sarif}) so a forward-exploration run never overwrites the normal
-	 * source/sink query's {@code <prog>.sarif} on disk (they are read back immediately either way,
-	 * but keeping the files separate avoids stale/ambiguous artifacts for external tooling).
+	 * resulting SARIF into the data frame. {@code outputTag} is inserted into the output SARIF name
+	 * ({@code <prog><outputTag>.sarif}) so each caller writes a distinct artifact and never overwrites
+	 * another's: {@code ""} for the normal source/sink query, {@code "-explore"} for forward
+	 * exploration, {@code "-explore-bwd"} for backward exploration.
 	 */
 	private boolean runNativeQuery(Program program, PluginTool tool, File queryFile,
-			boolean exploration) throws Exception {
+			String outputTag) throws Exception {
 		taintOptions = plugin.getOptions();
 		File engineFile = Path.of(taintOptions.getTaintEnginePath()).toFile();
 		if (!engineFile.exists()) {
@@ -212,8 +243,7 @@ public class CTADLTaintState extends AbstractTaintState {
 			}
 		}
 
-		File outSarif =
-			Path.of(outputDir, prog + (exploration ? "-explore.sarif" : ".sarif")).toFile();
+		File outSarif = Path.of(outputDir, prog + outputTag + ".sarif").toFile();
 		plugin.consoleMessage("Using " + getName() + " binary: " + engineFile);
 
 		boolean ok = NativeCtadlRunner.query(engineFile.toString(), store, prog,
@@ -346,32 +376,14 @@ public class CTADLTaintState extends AbstractTaintState {
 		// Sources: active marks + enabled authored source models.
 		appendSourceGenerators(generators);
 
-		// Sinks: active marks.
-		for (TaintLabel mark : sinks) {
-			if (mark.isActive()) {
-				JsonObject gen = buildGenerator(mark, false);
-				if (gen != null) {
-					generators.add(gen);
-				}
-			}
-		}
+		// Sinks: active marks + enabled authored sink models.
+		appendSinkGenerators(generators);
 
 		for (TaintLabel mark : gates) {
 			if (mark.isActive()) {
 				plugin.consoleMessage(
 					"CTADL: sanitizer/gate marks are not supported by the JSON5 model " +
 						"format; skipping " + mark);
-			}
-		}
-
-		// Enabled authored sink models (source models are added by appendSourceGenerators;
-		// propagation models are index-time and applied during Create Index, not here).
-		for (TaintModel m : authoredModels) {
-			if (m.enabled() && m.role() == TaintModel.Role.SINK) {
-				JsonObject gen = taintModelToGenerator(m);
-				if (gen != null) {
-					generators.add(gen);
-				}
 			}
 		}
 
@@ -400,6 +412,26 @@ public class CTADLTaintState extends AbstractTaintState {
 	}
 
 	/**
+	 * Writes the backward-<b>exploration</b> query: the enabled sink generators plus one synthetic
+	 * catch-all source (every function with code, sources on {@code Return} and {@code Argument(0..N)})
+	 * per distinct sink kind. Making the whole program a source turns the engine's forward cone into
+	 * "everything," so the meet-in-the-middle materializes the sink's full backward cone (reported as
+	 * {@code C0002} tainted-instructions). Authored/interior sources and propagation models are
+	 * intentionally omitted. Returns false when there is no enabled sink to explore (nothing written).
+	 */
+	public boolean writeBackwardExplorationQueryFile(File queryTextFile) throws Exception {
+		Set<String> kinds = enabledSinkKinds();
+		if (kinds.isEmpty()) {
+			return false;
+		}
+		JsonArray generators = new JsonArray();
+		appendSinkGenerators(generators);
+		generators.add(catchAllSourceGenerator(kinds));
+		writeGenerators(generators, queryTextFile);
+		return true;
+	}
+
+	/**
 	 * Appends the enabled source generators — active source marks and enabled authored
 	 * {@link TaintModel.Role#SOURCE} models — to {@code generators}. Shared by the normal
 	 * source/sink query ({@link #writeQueryFile}) and forward exploration
@@ -416,6 +448,31 @@ public class CTADLTaintState extends AbstractTaintState {
 		}
 		for (TaintModel m : authoredModels) {
 			if (m.enabled() && m.role() == TaintModel.Role.SOURCE) {
+				JsonObject gen = taintModelToGenerator(m);
+				if (gen != null) {
+					generators.add(gen);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Appends the enabled sink generators — active sink marks and enabled authored
+	 * {@link TaintModel.Role#SINK} models — to {@code generators}. Shared by the normal
+	 * source/sink query ({@link #writeQueryFile}) and backward exploration
+	 * ({@link #writeBackwardExplorationQueryFile}).
+	 */
+	private void appendSinkGenerators(JsonArray generators) {
+		for (TaintLabel mark : sinks) {
+			if (mark.isActive()) {
+				JsonObject gen = buildGenerator(mark, false);
+				if (gen != null) {
+					generators.add(gen);
+				}
+			}
+		}
+		for (TaintModel m : authoredModels) {
+			if (m.enabled() && m.role() == TaintModel.Role.SINK) {
 				JsonObject gen = taintModelToGenerator(m);
 				if (gen != null) {
 					generators.add(gen);
@@ -557,6 +614,34 @@ public class CTADLTaintState extends AbstractTaintState {
 	}
 
 	/**
+	 * The distinct taint kinds of the currently enabled sinks (active sink marks + enabled authored
+	 * sink models). Used to pair the backward-exploration catch-all source with the right kind(s);
+	 * order-preserving so the emitted model is stable.
+	 */
+	private Set<String> enabledSinkKinds() {
+		Set<String> kinds = new LinkedHashSet<>();
+		for (TaintLabel mark : sinks) {
+			// Mirror of enabledSourceKinds: a null-label mark would still be emitted as a sink by
+			// buildGenerator (with a null kind), but it gets no matching catch-all source kind here,
+			// so it contributes no backward cone. Marks normally always carry a label.
+			if (mark.isActive() && mark.getLabel() != null) {
+				kinds.add(mark.getLabel());
+			}
+		}
+		for (TaintModel m : authoredModels) {
+			if (m.enabled() && m.role() == TaintModel.Role.SINK && m.kind() != null) {
+				kinds.add(m.kind());
+			}
+		}
+		return kinds;
+	}
+
+	/** True if there is an active sink mark or enabled authored sink model to explore. */
+	public boolean hasEnabledSink() {
+		return !enabledSinkKinds().isEmpty();
+	}
+
+	/**
 	 * Builds the synthetic catch-all sink generator for forward exploration: every function with a
 	 * body ({@code has_code}) is a sink on {@code Argument(0..EXPLORE_MAX_ARG)}, one endpoint per
 	 * distinct source {@code kind}. This makes the engine's backward cone cover the whole program so
@@ -580,6 +665,42 @@ public class CTADLTaintState extends AbstractTaintState {
 		}
 		JsonObject model = new JsonObject();
 		model.add("sinks", sinks);
+
+		JsonObject gen = new JsonObject();
+		gen.addProperty("find", "methods");
+		gen.add("where", where);
+		gen.add("model", model);
+		return gen;
+	}
+
+	/**
+	 * Builds the synthetic catch-all source generator for backward exploration: every function with a
+	 * body ({@code has_code}) is a source on {@code Return} and {@code Argument(0..EXPLORE_MAX_ARG)},
+	 * one endpoint per distinct sink {@code kind}. This makes the engine's forward cone cover the whole
+	 * program so the sink's backward cone is fully materialized. (An engine-native backward slice would
+	 * replace this; {@code --compute-slices} is currently a no-op — see the Denis findings doc.)
+	 */
+	private JsonObject catchAllSourceGenerator(Set<String> kinds) {
+		JsonArray where = new JsonArray();
+		JsonObject hasCode = new JsonObject();
+		hasCode.addProperty("constraint", "has_code");
+		where.add(hasCode);
+
+		JsonArray sources = new JsonArray();
+		for (String kind : kinds) {
+			JsonObject ret = new JsonObject();
+			ret.addProperty("port", "Return");
+			ret.addProperty("kind", kind);
+			sources.add(ret);
+			for (int i = 0; i <= EXPLORE_MAX_ARG; i++) {
+				JsonObject ep = new JsonObject();
+				ep.addProperty("port", "Argument(" + i + ")");
+				ep.addProperty("kind", kind);
+				sources.add(ep);
+			}
+		}
+		JsonObject model = new JsonObject();
+		model.add("sources", sources);
 
 		JsonObject gen = new JsonObject();
 		gen.addProperty("find", "methods");
