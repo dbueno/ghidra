@@ -27,7 +27,9 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
+import docking.widgets.OptionDialog;
 import docking.widgets.filechooser.GhidraFileChooser;
+import ghidra.app.plugin.core.decompiler.taint.CreateTargetIndexTask;
 import generic.jar.ResourceFile;
 import ghidra.app.decompiler.*;
 import ghidra.app.plugin.core.decompiler.taint.*;
@@ -41,6 +43,7 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
+import ghidra.util.exception.CancelledException;
 
 /**
  * Container for all the decompiler elements the users "selects" via the menu.
@@ -107,6 +110,33 @@ public class CTADLTaintState extends AbstractTaintState {
 			String store = taintOptions.getTaintStoreDirectory();
 			String prog = NativeCtadlRunner.sanitizeName(program.getName());
 
+			// Pre-flight: a query needs an on-disk index for this program. If it is missing, offer
+			// to build it now instead of failing later with an opaque "No SARIF generated" error.
+			if (!isIndexed(store, prog)) {
+				int choice = OptionDialog.showYesNoDialog(tool.getActiveWindow(),
+					"Program not indexed",
+					"'" + program.getName() + "' has not been indexed yet, so there is nothing to " +
+						"query.\n\nRun 'Initialize Program Index' now, then continue the query?");
+				if (choice != OptionDialog.YES_OPTION) {
+					plugin.consoleMessage(
+						"Query skipped: '" + program.getName() + "' is not indexed.");
+					return false;
+				}
+				try {
+					// Reuse the full index flow (facts import + index, propagation models, freshness).
+					new CreateTargetIndexTask(plugin, program).run(monitor);
+				}
+				catch (CancelledException e) {
+					plugin.consoleMessage("Indexing cancelled; query skipped.");
+					return false;
+				}
+				if (!isIndexed(store, prog)) {
+					plugin.consoleMessage("Indexing did not complete; query skipped. " +
+						"Check the engine, facts, and store settings.");
+					return false;
+				}
+			}
+
 			// Resolve the source/sink model file for this query.
 			File queryFile;
 			if (queryType.equals(QueryType.CUSTOM)) {
@@ -145,6 +175,32 @@ public class CTADLTaintState extends AbstractTaintState {
 			Msg.error(this, "Problems running query: " + e);
 			return false;
 		}
+	}
+
+	/**
+	 * True if the ctadl store already holds an index for {@code prog}. The native pipeline keys the
+	 * index by the sanitized program name at {@code <storeRoot>/ctadl/projects/<prog>/index}.
+	 */
+	private static boolean isIndexed(String storeOpt, String prog) {
+		File indexDir =
+			Path.of(storeRoot(storeOpt), "ctadl", "projects", prog, "index").toFile();
+		String[] contents = indexDir.list();
+		return contents != null && contents.length > 0;
+	}
+
+	/**
+	 * The store root ctadl uses: the {@code Taint.Directories.Store} option when set (the runner
+	 * exports it as {@code XDG_STATE_HOME}), else {@code $XDG_STATE_HOME}, else {@code ~/.local/state}.
+	 */
+	private static String storeRoot(String storeOpt) {
+		if (storeOpt != null && !storeOpt.isBlank()) {
+			return storeOpt;
+		}
+		String xdg = System.getenv("XDG_STATE_HOME");
+		if (xdg != null && !xdg.isBlank()) {
+			return xdg;
+		}
+		return System.getProperty("user.home") + File.separator + ".local" + File.separator + "state";
 	}
 
 	// buildQuery/buildIndex below are superseded by the native driver (queryIndex above
