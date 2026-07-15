@@ -146,6 +146,20 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 			}
 		}
 
+		// This by-name edit path has no decompiler context, so the picker can only show committed
+		// formal parameters (no HighFunction fallback). If the function has none but the models
+		// reference argument ports, editing them here isn't possible — direct the analyst to commit
+		// the signature (the decompiler right-click authoring path uses the inferred signature).
+		boolean refsArg = group.stream()
+				.anyMatch(m -> isArg(m.port()) || isArg(m.inputPort()) || isArg(m.outputPort()));
+		if (func.getParameters().length == 0 && refsArg) {
+			Msg.showWarn(this, null, "Commit signature to edit",
+				"'" + func.getName() + "' has no committed parameters, so its argument ports " +
+					"can't be shown here.\nOpen it in the decompiler and run Commit Params/Return, " +
+					"then edit (or re-author it from the decompiler right-click).");
+			return;
+		}
+
 		TaintModelDialog dialog = new TaintModelDialog(func, group);
 		plugin.getTool().showDialog(dialog);
 		if (dialog.isCancelled()) {
@@ -160,6 +174,11 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 		}
 		state.addModels(dialog.getResult());
 		refresh();
+	}
+
+	/** True if a stored port string references an argument (vs. Return / null). */
+	private static boolean isArg(String port) {
+		return port != null && port.startsWith("Argument");
 	}
 
 	/**

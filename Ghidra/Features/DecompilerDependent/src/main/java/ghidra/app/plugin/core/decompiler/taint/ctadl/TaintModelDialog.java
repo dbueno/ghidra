@@ -15,6 +15,7 @@ import docking.widgets.label.GLabel;
 import ghidra.app.plugin.core.decompiler.taint.ctadl.model.PortOption;
 import ghidra.app.plugin.core.decompiler.taint.ctadl.model.TaintModel;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.pcode.HighFunction;
 
 /**
  * Function-centric picker: given a resolved {@link Function}, lets the analyst assign each
@@ -73,7 +74,15 @@ public class TaintModelDialog extends DialogComponentProvider {
 	}
 
 	public TaintModelDialog(Function function) {
-		this(function, List.of());
+		this(function, null, List.of());
+	}
+
+	/**
+	 * Picker with the decompiler's {@link HighFunction} so the port list can fall back to
+	 * inferred parameters when {@code function} has no committed formal parameters.
+	 */
+	public TaintModelDialog(Function function, HighFunction hf) {
+		this(function, hf, List.of());
 	}
 
 	/**
@@ -82,10 +91,19 @@ public class TaintModelDialog extends DialogComponentProvider {
 	 * caller replaces the function's whole model set with {@link #getResult()}.
 	 */
 	public TaintModelDialog(Function function, List<TaintModel> seed) {
+		this(function, null, seed);
+	}
+
+	/**
+	 * Master constructor. {@code hf} (the decompiler's HighFunction for {@code function}, or
+	 * {@code null}) lets the port list fall back to inferred parameters when the function has no
+	 * committed formal parameters — see {@link FunctionPortResolver#portsOf(Function, HighFunction)}.
+	 */
+	public TaintModelDialog(Function function, HighFunction hf, List<TaintModel> seed) {
 		super("Model taint for " + FunctionPortResolver.resolveTarget(function).getName());
 		Function target = FunctionPortResolver.resolveTarget(function);
 		this.functionName = target.getName();
-		this.ports = FunctionPortResolver.portsOf(target);
+		this.ports = FunctionPortResolver.portsOf(target, hf);
 		addWorkPanel(buildPanel());
 		addOKButton();
 		addCancelButton();

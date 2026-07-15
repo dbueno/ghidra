@@ -17,6 +17,7 @@ import ghidra.app.plugin.core.decompiler.taint.ctadl.model.TaintModel;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.symbol.Reference;
 import ghidra.util.HelpLocation;
 import ghidra.util.Msg;
@@ -53,14 +54,20 @@ public class TaintModelFromFunctionAction extends TaintAbstractDecompilerAction 
 	protected void decompilerActionPerformed(DecompilerActionContext context) {
 		Program program = context.getProgram();
 		Function target = calleeFromToken(context.getTokenAtCursor(), program);
+		HighFunction hf = null;
 		if (target == null) {
+			// Enclosing function: the decompiler's HighFunction describes it, so hand it to the
+			// picker — its ports fall back to inferred parameters when the signature is
+			// uncommitted (e.g. user code like main). A resolved callee keeps hf == null (the
+			// HighFunction is the caller's, and library callees carry committed signatures).
 			target = context.getFunction();
+			hf = context.getHighFunction();
 		}
 		if (target == null) {
 			return;
 		}
 
-		TaintModelDialog dialog = new TaintModelDialog(target);
+		TaintModelDialog dialog = new TaintModelDialog(target, hf);
 		context.getTool().showDialog(dialog);
 		if (dialog.isCancelled() || dialog.getResult().isEmpty()) {
 			return;
