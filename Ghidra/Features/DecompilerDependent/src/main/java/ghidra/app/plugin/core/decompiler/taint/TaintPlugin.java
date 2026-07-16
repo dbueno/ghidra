@@ -365,14 +365,7 @@ public class TaintPlugin extends ProgramPlugin implements TaintService {
 
 			@Override
 			public void actionPerformed(ActionContext context) {
-				GhidraState ghidraState = new GhidraState(tool, null, currentProgram,
-					currentLocation, currentHighlight, currentHighlight);
-				GhidraScript exportScript = state.getExportScript(consoleService, false);
-				if (exportScript != null) {
-					RunPCodeExportScriptTask export_task =
-						new RunPCodeExportScriptTask(tool, exportScript, ghidraState, consoleService);
-					tool.execute(export_task);
-				}
+				runFactExport();
 			}
 
 			@Override
@@ -388,9 +381,7 @@ public class TaintPlugin extends ProgramPlugin implements TaintService {
 		DockingAction saveTableDataAction = new DockingAction("InitializeIndex", HELP_LOCATION) {
 			@Override
 			public void actionPerformed(ActionContext context) {
-				CreateTargetIndexTask index_task =
-					new CreateTargetIndexTask(plugin, plugin.getCurrentProgram());
-				tool.execute(index_task);
+				runCreateIndex();
 			}
 
 			@Override
@@ -459,6 +450,31 @@ public class TaintPlugin extends ProgramPlugin implements TaintService {
 		tool.addAction(exportFuncAction);
 		tool.addAction(saveTableDataAction);
 		tool.addAction(showModelsAction);
+	}
+
+	/**
+	 * Runs the whole-program PCode fact export. Shared by the {@code Tools > Source-Sink >
+	 * Export PCode Facts} menu item and the Taint Models panel's Run Fact Export button.
+	 */
+	public void runFactExport() {
+		GhidraState ghidraState = new GhidraState(tool, null, currentProgram,
+			currentLocation, currentHighlight, currentHighlight);
+		GhidraScript exportScript = state.getExportScript(consoleService, false);
+		if (exportScript != null) {
+			RunPCodeExportScriptTask export_task =
+				new RunPCodeExportScriptTask(tool, exportScript, ghidraState, consoleService);
+			tool.execute(export_task);
+		}
+	}
+
+	/**
+	 * Builds/refreshes the native ctadl index for the current program. Shared by the
+	 * {@code Tools > Source-Sink > Initialize Program Index} menu item and the Taint Models
+	 * panel's Run Index button.
+	 */
+	public void runCreateIndex() {
+		CreateTargetIndexTask index_task = new CreateTargetIndexTask(this, getCurrentProgram());
+		tool.execute(index_task);
 	}
 
 	public TaintState getTaintState() {
