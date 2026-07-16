@@ -137,6 +137,30 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 			"pairs them with a catch-all sink so the source's forward cone is computed. Apply the " +
 			"'All tainted' highlight scope to see it.");
 		addLocalAction(explore);
+
+		// Backward taint exploration: the mirror of forward — runs the enabled sink model(s)
+		// against a synthetic catch-all source so the sink's backward cone (everything that can
+		// taint it) is highlighted. Also model-set-wide, so it belongs on this toolbar.
+		DockingAction exploreBack =
+			new DockingAction("Explore Backward Taint", plugin.getName()) {
+				@Override
+				public void actionPerformed(ActionContext context) {
+					runBackwardExploration();
+				}
+
+				@Override
+				public boolean isEnabledForContext(ActionContext context) {
+					CTADLTaintState state = currentState();
+					return state != null && state.hasEnabledSink();
+				}
+			};
+		exploreBack.setToolBarData(new ToolBarData(Icons.ARROW_UP_LEFT_ICON));
+		exploreBack.setPopupMenuData(new MenuData(new String[] { "Explore backward taint" }));
+		exploreBack.setDescription(
+			"Run a backward taint exploration into the enabled sink model(s): pairs them with a " +
+				"catch-all source so the sink's backward cone is computed. Apply the 'All tainted' " +
+				"highlight scope to see it.");
+		addLocalAction(exploreBack);
 	}
 
 	/**
@@ -180,6 +204,49 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 		}
 		plugin.getProvider().setTaint();
 		plugin.consoleMessage("exploration query complete");
+	}
+
+	/**
+	 * Runs a backward taint exploration into the currently enabled sinks and displays the result,
+	 * mirroring {@link #runExploration()}. The exploration query itself lives in
+	 * {@link CTADLTaintState#queryBackwardExploration}. Model-set-wide, not tied to the cursor —
+	 * hence its home on this panel.
+	 */
+	private void runBackwardExploration() {
+		CTADLTaintState state = currentState();
+		if (state == null) {
+			return;
+		}
+		Program program = plugin.getCurrentProgram();
+		if (program == null) {
+			Msg.showWarn(this, null, "No program", "Open a program before exploring taint.");
+			return;
+		}
+		PluginTool tool = plugin.getTool();
+
+		Task task = new Task("Backward taint exploration", true, true, true, true) {
+			@Override
+			public void run(TaskMonitor monitor) {
+				state.setMonitor(monitor);
+				state.queryBackwardExploration(program, tool);
+				state.setMonitor(null);
+			}
+		};
+		tool.execute(task);
+
+		if (task.isCancelled()) {
+			plugin.consoleMessage("Backward taint exploration was cancelled.");
+			return;
+		}
+		TaintFormat format = state.getOptions().getTaintOutputForm();
+		if (!format.equals(TaintFormat.NONE)) {
+			SarifService sarifService = plugin.getSarifService();
+			sarifService.getController().setDefaultGraphHander(SarifTaintGraphRunHandler.class);
+			String queryName = state.getQueryName();
+			sarifService.showSarif(queryName != null ? queryName : "explore-bwd", state.getData());
+		}
+		plugin.getProvider().setTaint();
+		plugin.consoleMessage("backward exploration query complete");
 	}
 
 	/**
@@ -299,6 +366,11 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 				? "⚠ Index out of date — re-run Initialize Program Index to apply propagation changes"
 				: "");
 		staleBanner.setVisible(stale);
+		// The enabled state of the Explore Forward/Backward toolbar actions depends on the model
+		// set (hasEnabledSource/hasEnabledSink), which changes here (add, delete, and the restore-
+		// from-persistence flush on tool restart). Kick the tool so those local actions re-evaluate
+		// isEnabledForContext — otherwise a restored source/sink leaves the buttons greyed out.
+		contextChanged();
 	}
 
 	@Override
@@ -357,6 +429,10 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 			TaintModel m = currentModels().get(row);
 			m.setEnabled((Boolean) value);
 			fireTableCellUpdated(row, col);
+			// Toggling a source/sink model's enabled state changes whether the Explore
+			// Forward/Backward buttons should be enabled; re-evaluate the panel's local toolbar
+			// actions (the propagation branch below also refreshes, which is idempotent here).
+			TaintModelPanel.this.contextChanged();
 			// Enabling/disabling a propagation model changes the index: mark stale and warn once.
 			if (m.role() == TaintModel.Role.PROPAGATION) {
 				CTADLTaintState state = currentState();
