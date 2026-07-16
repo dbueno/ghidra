@@ -366,6 +366,11 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 				? "⚠ Index out of date — re-run Initialize Program Index to apply propagation changes"
 				: "");
 		staleBanner.setVisible(stale);
+		// The enabled state of the Explore Forward/Backward toolbar actions depends on the model
+		// set (hasEnabledSource/hasEnabledSink), which changes here (add, delete, and the restore-
+		// from-persistence flush on tool restart). Kick the tool so those local actions re-evaluate
+		// isEnabledForContext — otherwise a restored source/sink leaves the buttons greyed out.
+		contextChanged();
 	}
 
 	@Override
@@ -424,6 +429,10 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 			TaintModel m = currentModels().get(row);
 			m.setEnabled((Boolean) value);
 			fireTableCellUpdated(row, col);
+			// Toggling a source/sink model's enabled state changes whether the Explore
+			// Forward/Backward buttons should be enabled; re-evaluate the panel's local toolbar
+			// actions (the propagation branch below also refreshes, which is idempotent here).
+			TaintModelPanel.this.contextChanged();
 			// Enabling/disabling a propagation model changes the index: mark stale and warn once.
 			if (m.role() == TaintModel.Role.PROPAGATION) {
 				CTADLTaintState state = currentState();
