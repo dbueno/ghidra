@@ -7,8 +7,16 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+
+import docking.widgets.filechooser.GhidraFileChooser;
+import docking.widgets.filechooser.GhidraFileChooserMode;
+import ghidra.app.plugin.core.decompiler.taint.ctadl.model.PortOption;
+import ghidra.app.plugin.core.decompiler.taint.ctadl.model.TaintModelJson;
 
 import javax.swing.*;
 import javax.swing.table.AbstractTableModel;
@@ -161,6 +169,82 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 				"catch-all source so the sink's backward cone is computed. Apply the 'All tainted' " +
 				"highlight scope to see it.");
 		addLocalAction(exploreBack);
+
+		// Pipeline: run the PCode fact export for the current program (the input to indexing).
+		// Same action as Tools > Source-Sink > Export PCode Facts, surfaced here so the whole
+		// native-ctadl workflow (export -> index -> model -> query) is drivable from one panel.
+		DockingAction factExport = new DockingAction("Run Fact Export", plugin.getName()) {
+			@Override
+			public void actionPerformed(ActionContext context) {
+				plugin.runFactExport();
+			}
+
+			@Override
+			public boolean isEnabledForContext(ActionContext context) {
+				return plugin.getCurrentProgram() != null;
+			}
+		};
+		factExport.setToolBarData(new ToolBarData(Icons.MAKE_SELECTION_ICON));
+		factExport.setPopupMenuData(new MenuData(new String[] { "Run fact export" }));
+		factExport.setDescription("Export this program's PCode facts (the input to indexing). " +
+			"Same as Tools > Source-Sink > Export PCode Facts.");
+		addLocalAction(factExport);
+
+		// Pipeline: build/refresh the native ctadl index. Same action as Tools > Source-Sink >
+		// Initialize Program Index.
+		DockingAction runIndex = new DockingAction("Run Index", plugin.getName()) {
+			@Override
+			public void actionPerformed(ActionContext context) {
+				plugin.runCreateIndex();
+			}
+
+			@Override
+			public boolean isEnabledForContext(ActionContext context) {
+				return plugin.getCurrentProgram() != null;
+			}
+		};
+		runIndex.setToolBarData(new ToolBarData(Icons.REFRESH_ICON));
+		runIndex.setPopupMenuData(new MenuData(new String[] { "Run index" }));
+		runIndex.setDescription("Build or refresh the native ctadl index for this program from the " +
+			"exported facts and enabled propagation models.");
+		addLocalAction(runIndex);
+
+		// Export the authored model set (all models, enabled and disabled) to a ctadl-CLI model
+		// file (engine model-generator format).
+		DockingAction exportModels = new DockingAction("Export Models to JSON", plugin.getName()) {
+			@Override
+			public void actionPerformed(ActionContext context) {
+				exportModels();
+			}
+
+			@Override
+			public boolean isEnabledForContext(ActionContext context) {
+				return !currentModels().isEmpty();
+			}
+		};
+		exportModels.setToolBarData(new ToolBarData(Icons.SAVE_ICON));
+		exportModels.setPopupMenuData(new MenuData(new String[] { "Export models to JSON" }));
+		exportModels.setDescription("Write all authored taint models to a JSON file in the engine " +
+			"model-generator format (feedable to ctadl -m).");
+		addLocalAction(exportModels);
+
+		// Import models from a ctadl-CLI model file, merging them (enabled) into the current set.
+		DockingAction importModels = new DockingAction("Import Models from JSON", plugin.getName()) {
+			@Override
+			public void actionPerformed(ActionContext context) {
+				importModels();
+			}
+
+			@Override
+			public boolean isEnabledForContext(ActionContext context) {
+				return currentState() != null;
+			}
+		};
+		importModels.setToolBarData(new ToolBarData(Icons.OPEN_FOLDER_ICON));
+		importModels.setPopupMenuData(new MenuData(new String[] { "Import models from JSON" }));
+		importModels.setDescription("Read taint models from a JSON file (engine model-generator " +
+			"format) and merge them into the current set.");
+		addLocalAction(importModels);
 	}
 
 	/**
@@ -247,6 +331,98 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 		}
 		plugin.getProvider().setTaint();
 		plugin.consoleMessage("backward exploration query complete");
+	}
+
+	/** Export all authored models to a chosen file in the engine CLI model-generator format. */
+	private void exportModels() {
+		List<TaintModel> models = currentModels();
+		if (models.isEmpty()) {
+			Msg.showWarn(this, null, "No models", "There are no taint models to export.");
+			return;
+		}
+		GhidraFileChooser chooser = new GhidraFileChooser(mainPanel);
+		chooser.setTitle("Export Taint Models to JSON");
+		chooser.setFileSelectionMode(GhidraFileChooserMode.FILES_ONLY);
+		File file = chooser.getSelectedFile();
+		chooser.dispose();
+		if (file == null) {
+			return;
+		}
+		try {
+			Files.writeString(file.toPath(), TaintModelJson.export(models));
+			plugin.consoleMessage(
+				"Exported " + models.size() + " taint model(s) to " + file.getAbsolutePath());
+		}
+		catch (IOException e) {
+			Msg.showError(this, null, "Export failed",
+				"Could not write " + file.getAbsolutePath() + ": " + e.getMessage(), e);
+		}
+	}
+
+	/** Import models from a chosen JSON file (engine model-generator format), merging them in. */
+	private void importModels() {
+		CTADLTaintState state = currentState();
+		if (state == null) {
+			Msg.showWarn(this, null, "No CTADL state",
+				"The active taint engine is not CTADL; cannot import models.");
+			return;
+		}
+		GhidraFileChooser chooser = new GhidraFileChooser(mainPanel);
+		chooser.setTitle("Import Taint Models from JSON");
+		chooser.setFileSelectionMode(GhidraFileChooserMode.FILES_ONLY);
+		File file = chooser.getSelectedFile();
+		chooser.dispose();
+		if (file == null) {
+			return;
+		}
+		List<TaintModel> imported;
+		try {
+			String json = Files.readString(file.toPath());
+			imported = TaintModelJson.importModels(json, displayResolver(plugin.getCurrentProgram()));
+		}
+		catch (IOException | RuntimeException e) {
+			Msg.showError(this, null, "Import failed",
+				"Could not read models from " + file.getAbsolutePath() + ": " + e.getMessage(), e);
+			return;
+		}
+		if (imported.isEmpty()) {
+			Msg.showWarn(this, null, "Nothing imported",
+				"No taint models were found in " + file.getAbsolutePath() + ".");
+			return;
+		}
+		state.addModels(imported);
+		refresh();
+		plugin.consoleMessage(
+			"Imported " + imported.size() + " taint model(s) from " + file.getAbsolutePath());
+	}
+
+	/**
+	 * A {@link TaintModelJson.DisplayResolver} that reconstructs a model's cosmetic port label
+	 * from {@code program}: resolve the function by name (thunks unwrapped), then map the raw
+	 * port token (with an optional trailing {@code .deref}) back to the matching
+	 * {@link PortOption}'s display via {@link FunctionPortResolver}. Returns null (raw-token
+	 * fallback) when there is no program, the function is absent, or the port has no match.
+	 */
+	private TaintModelJson.DisplayResolver displayResolver(Program program) {
+		if (program == null) {
+			return TaintModelJson.NO_DISPLAY;
+		}
+		return (functionName, portToken) -> {
+			Function f = resolveFunction(program, List.of(functionName));
+			if (f == null) {
+				return null;
+			}
+			f = FunctionPortResolver.resolveTarget(f);
+			boolean deref = portToken != null && portToken.endsWith(".deref");
+			String base = deref ? portToken.substring(0, portToken.length() - ".deref".length())
+					: portToken;
+			for (PortOption p : FunctionPortResolver.portsOf(f)) {
+				if (p.basePort().equals(base)) {
+					return p.displayPort(deref);
+				}
+			}
+			return null;
+		};
 	}
 
 	/**
