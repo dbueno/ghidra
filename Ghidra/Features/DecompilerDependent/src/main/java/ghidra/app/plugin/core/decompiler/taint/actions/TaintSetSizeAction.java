@@ -49,7 +49,7 @@ public class TaintSetSizeAction extends TaintAbstractDecompilerAction {
 		super("Set length");
 		setHelpLocation(new HelpLocation(TaintPlugin.HELP_LOCATION, TaintPlugin.HELP_LOCATION));
 		// Taint Menu  -> Source sub item.
-		setPopupMenuData(new MenuData(new String[] { "Taint", "Set length" }, "Decompile"));
+		setPopupMenuData(new MenuData(new String[] { "Taint", "Experimental", "Set length" }, "Decompile"));
 		this.plugin = plugin;
 	}
 

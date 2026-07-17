@@ -36,7 +36,7 @@ public class TaintClearAction extends TaintAbstractDecompilerAction {
 	public TaintClearAction(TaintPlugin plugin) {
 		super("Clear Markers");
 		setHelpLocation(new HelpLocation(TaintPlugin.HELP_LOCATION, "TaintClear"));
-		setPopupMenuData(new MenuData(new String[] { "Taint", "Clear" }, "Decompile"));
+		setPopupMenuData(new MenuData(new String[] { "Taint", "Experimental", "Clear" }, "Decompile"));
 		setKeyBindingData(
 			new KeyBindingData(KeyEvent.VK_S, DockingUtils.CONTROL_KEY_MODIFIER_MASK));
 		this.plugin = plugin;

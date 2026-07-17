@@ -44,7 +44,7 @@ public class TaintGateAction extends TaintAbstractDecompilerAction {
 	public TaintGateAction(TaintPlugin plugin) {
 		super("Mark Gate");
 		setHelpLocation(new HelpLocation(TaintPlugin.HELP_LOCATION, "TaintGate"));
-		setPopupMenuData(new MenuData(new String[] { "Taint", "Gate" }, "Decompile"));
+		setPopupMenuData(new MenuData(new String[] { "Taint", "Experimental", "Gate" }, "Decompile"));
 		setKeyBindingData(new KeyBindingData(KeyEvent.VK_S, InputEvent.ALT_DOWN_MASK));
 		this.plugin = plugin;
 		this.mtype = MarkType.GATE;

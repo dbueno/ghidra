@@ -16,6 +16,7 @@
 package ghidra.app.plugin.core.decompiler.taint;
 
 import java.awt.Color;
+import java.io.File;
 import java.util.*;
 
 import javax.swing.Icon;
@@ -47,6 +48,7 @@ import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.util.ProgramSelection;
 import ghidra.util.Msg;
 import ghidra.util.Swing;
+import ghidra.util.bean.opteditor.OptionsVetoException;
 
 public class TaintProvider extends ComponentProviderAdapter implements OptionsChangeListener {
 
@@ -228,7 +230,50 @@ public class TaintProvider extends ComponentProviderAdapter implements OptionsCh
 			Object newValue) {
 		if (options.getName().equals(OPTIONS_TITLE) ||
 			options.getName().equals(GhidraOptions.CATEGORY_BROWSER_FIELDS)) {
+			validateDirectoryOption(optionName, newValue);
 			doRefresh();
+		}
+	}
+
+	/**
+	 * Reject a path option whose value points at an existing filesystem entry of the wrong
+	 * kind: the Engine option must be a file (the ctadl executable), while the Facts, Output,
+	 * and Store options must be directories. Throwing {@link OptionsVetoException} reverts the
+	 * option to its previous value and surfaces the message to the user.
+	 * <p>
+	 * A blank value (allowed everywhere, and the way Store selects the ctadl default) and a
+	 * path that does not yet exist (e.g. an output directory to be created) both pass through
+	 * unchallenged.
+	 */
+	private void validateDirectoryOption(String optionName, Object newValue) {
+		if (TaintOptions.OP_KEY_TAINT_ENGINE_PATH.equals(optionName)) {
+			vetoIfWrongType(newValue, false,
+				"Taint > Directories > Engine must be the ctadl executable (a file), " +
+					"not a directory.");
+		}
+		else if (TaintOptions.OP_KEY_TAINT_FACTS_DIR.equals(optionName) ||
+			TaintOptions.OP_KEY_TAINT_OUTPUT_DIR.equals(optionName) ||
+			TaintOptions.OP_KEY_TAINT_STORE_DIR.equals(optionName)) {
+			String label = optionName.substring(optionName.lastIndexOf('.') + 1);
+			vetoIfWrongType(newValue, true,
+				"Taint > Directories > " + label + " must be a directory, not a file.");
+		}
+	}
+
+	private void vetoIfWrongType(Object newValue, boolean wantDirectory, String message) {
+		String path = newValue == null ? "" : newValue.toString().trim();
+		if (path.isEmpty()) {
+			return; // blank allowed (e.g. Store = ctadl default)
+		}
+		File f = new File(path);
+		if (!f.exists()) {
+			return; // not-yet-created path: allow, don't block
+		}
+		if (wantDirectory && f.isFile()) {
+			throw new OptionsVetoException(message);
+		}
+		if (!wantDirectory && f.isDirectory()) {
+			throw new OptionsVetoException(message);
 		}
 	}
 

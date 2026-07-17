@@ -17,9 +17,11 @@ package ghidra.app.plugin.core.decompiler.taint;
 
 import java.awt.Color;
 
+import docking.options.editor.StringBasedFileEditor;
 import generic.theme.GColor;
 import ghidra.app.plugin.core.decompiler.taint.TaintPlugin.*;
 import ghidra.app.util.HelpTopics;
+import ghidra.framework.options.OptionType;
 import ghidra.framework.options.ToolOptions;
 import ghidra.framework.plugintool.Plugin;
 import ghidra.program.model.listing.Program;
@@ -142,22 +144,35 @@ public class TaintOptions {
 			new HelpLocation(HelpTopics.DECOMPILER, "Taint Query Engine"),
 			"The query engine (e.g., angr, ctadl)");
 
-		opt.registerOption(OP_KEY_TAINT_ENGINE_PATH, DEFAULT_TAINT_ENGINE_PATH,
+		opt.registerOption(OP_KEY_TAINT_ENGINE_PATH, OptionType.STRING_TYPE,
+			DEFAULT_TAINT_ENGINE_PATH,
 			new HelpLocation(HelpTopics.DECOMPILER, "Taint Engine Directory"),
-			"Base path to external taint engine (Source-Sink executable).");
+			"Full path to the ctadl engine executable (the native ctadl binary). The plugin " +
+				"invokes this path directly to run import, index, and query, so it must point " +
+				"at a file, not a directory. Required.",
+			() -> new StringBasedFileEditor());
 
-		opt.registerOption(OP_KEY_TAINT_FACTS_DIR, DEFAULT_TAINT_FACTS_DIR,
+		opt.registerOption(OP_KEY_TAINT_FACTS_DIR, OptionType.STRING_TYPE,
+			DEFAULT_TAINT_FACTS_DIR,
 			new HelpLocation(HelpTopics.DECOMPILER, "Taint Facts Directory"),
-			"Base Path to facts directory");
+			"Directory where the PCode export writes fact files for the current program; " +
+				"these are consumed by 'ctadl import'. Must be a directory.",
+			() -> new StringBasedFileEditor());
 
-		opt.registerOption(OP_KEY_TAINT_OUTPUT_DIR, DEFAULT_TAINT_OUTPUT_DIR,
+		opt.registerOption(OP_KEY_TAINT_OUTPUT_DIR, OptionType.STRING_TYPE,
+			DEFAULT_TAINT_OUTPUT_DIR,
 			new HelpLocation(HelpTopics.DECOMPILER, "Taint Output Directory"),
-			"Base Path to output directory");
+			"Directory where query outputs (SARIF and other result files) are written. " +
+				"Must be a directory.",
+			() -> new StringBasedFileEditor());
 
-		opt.registerOption(OP_KEY_TAINT_STORE_DIR, DEFAULT_TAINT_STORE_DIR,
+		opt.registerOption(OP_KEY_TAINT_STORE_DIR, OptionType.STRING_TYPE,
+			DEFAULT_TAINT_STORE_DIR,
 			new HelpLocation(HelpTopics.DECOMPILER, "Taint Store Directory"),
-			"Optional override for the native ctadl store (sets XDG_STATE_HOME); " +
-				"leave empty to use ctadl's default store location.");
+			"Optional override for the native ctadl store location (applied as XDG_STATE_HOME). " +
+				"Must be a directory. Leave blank to use ctadl's default store, " +
+				"$XDG_STATE_HOME/ctadl (typically ~/.local/state/ctadl).",
+			() -> new StringBasedFileEditor());
 
 		opt.registerOption(OP_KEY_TAINT_QUERY, DEFAULT_TAINT_QUERY,
 			new HelpLocation(HelpTopics.DECOMPILER, "TaintQuery"),
