@@ -262,28 +262,31 @@ public class CTADLTaintState extends AbstractTaintState {
 
 	/**
 	 * True if the ctadl store already holds an index for {@code prog}. The native pipeline keys the
-	 * index by the sanitized program name at {@code <storeRoot>/ctadl/projects/<prog>/index}.
+	 * index by the sanitized program name at {@code <storeRoot>/projects/<prog>/index}.
 	 */
 	private static boolean isIndexed(String storeOpt, String prog) {
-		File indexDir =
-			Path.of(storeRoot(storeOpt), "ctadl", "projects", prog, "index").toFile();
+		File indexDir = Path.of(storeRoot(storeOpt), "projects", prog, "index").toFile();
 		String[] contents = indexDir.list();
 		return contents != null && contents.length > 0;
 	}
 
 	/**
-	 * The store root ctadl uses: the {@code Taint.Directories.Store} option when set (the runner
-	 * exports it as {@code XDG_STATE_HOME}), else {@code $XDG_STATE_HOME}, else {@code ~/.local/state}.
+	 * The ctadl store root — the directory that directly contains {@code projects/}. When the
+	 * {@code Taint.Directories.Store} option is set it is that directory verbatim (the runner passes
+	 * it to ctadl via {@code --store}, which is used as the store root with no {@code ctadl}
+	 * subdirectory appended). When blank, ctadl's default applies: {@code $XDG_STATE_HOME/ctadl}, or
+	 * {@code ~/.local/state/ctadl} when {@code XDG_STATE_HOME} is unset.
 	 */
 	private static String storeRoot(String storeOpt) {
 		if (storeOpt != null && !storeOpt.isBlank()) {
 			return storeOpt;
 		}
 		String xdg = System.getenv("XDG_STATE_HOME");
-		if (xdg != null && !xdg.isBlank()) {
-			return xdg;
-		}
-		return System.getProperty("user.home") + File.separator + ".local" + File.separator + "state";
+		String stateHome = (xdg != null && !xdg.isBlank())
+				? xdg
+				: System.getProperty("user.home") + File.separator + ".local" + File.separator +
+					"state";
+		return stateHome + File.separator + "ctadl";
 	}
 
 	// buildQuery/buildIndex below are superseded by the native driver (queryIndex above

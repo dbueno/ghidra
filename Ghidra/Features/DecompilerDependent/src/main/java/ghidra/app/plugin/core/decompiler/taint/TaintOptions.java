@@ -169,9 +169,10 @@ public class TaintOptions {
 		opt.registerOption(OP_KEY_TAINT_STORE_DIR, OptionType.STRING_TYPE,
 			DEFAULT_TAINT_STORE_DIR,
 			new HelpLocation(HelpTopics.DECOMPILER, "Taint Store Directory"),
-			"Optional override for the native ctadl store location (applied as XDG_STATE_HOME). " +
-				"Must be a directory. Leave blank to use ctadl's default store, " +
-				"$XDG_STATE_HOME/ctadl (typically ~/.local/state/ctadl).",
+			"Directory to use directly as the native ctadl store (the folder that holds " +
+				"projects/). Passed to ctadl as --store, so it is the store root itself — no " +
+				"'ctadl' subdirectory is appended. Must be a directory. Leave blank to use ctadl's " +
+				"default store, $XDG_STATE_HOME/ctadl (typically ~/.local/state/ctadl).",
 			() -> new StringBasedFileEditor());
 
 		opt.registerOption(OP_KEY_TAINT_QUERY, DEFAULT_TAINT_QUERY,

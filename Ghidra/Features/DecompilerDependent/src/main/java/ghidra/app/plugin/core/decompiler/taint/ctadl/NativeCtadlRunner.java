@@ -11,14 +11,15 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.lang.ProcessBuilder.Redirect;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
 /**
  * Runs the native ctadl pipeline (<code>import → index</code>, then <code>query</code>)
- * as OS processes, applying the store location via the <code>XDG_STATE_HOME</code>
- * environment variable. Argv is built by {@link NativeCtadlCommand}; this class owns
- * only the process mechanics (multi-phase sequencing, env, stdout draining, exit codes).
+ * as OS processes, applying the store location via the global <code>--store</code>
+ * flag. Argv is built by {@link NativeCtadlCommand}; this class owns
+ * only the process mechanics (multi-phase sequencing, stdout draining, exit codes).
  */
 public final class NativeCtadlRunner {
 	private NativeCtadlRunner() {
@@ -34,14 +35,24 @@ public final class NativeCtadlRunner {
 
 	private static int run(List<String> argv, String storeDir, File workDir, boolean mergeStderr,
 			Consumer<String> log) throws IOException, InterruptedException {
-		ProcessBuilder pb = new ProcessBuilder(argv);
+		// Store location: when a store dir is configured, pass it to ctadl via the global
+		// --store flag inserted right after the engine executable
+		// (ctadl --store <dir> <subcommand> ...). Unlike XDG_STATE_HOME, --store is used
+		// directly as the store root — no 'ctadl' subdirectory is appended. When unset, ctadl
+		// uses its own default ($XDG_STATE_HOME/ctadl).
+		List<String> storeArgs = NativeCtadlCommand.storeArgs(storeDir);
+		List<String> fullArgv;
+		if (storeArgs.isEmpty()) {
+			fullArgv = argv;
+		}
+		else {
+			fullArgv = new ArrayList<>(argv);
+			fullArgv.addAll(1, storeArgs);
+		}
+		ProcessBuilder pb = new ProcessBuilder(fullArgv);
 		if (workDir != null) {
 			pb.directory(workDir);
 		}
-		// Store location: only override XDG_STATE_HOME when a store dir is configured;
-		// otherwise ctadl uses its own default ($XDG_STATE_HOME/ctadl).
-		String store = (storeDir == null || storeDir.isBlank()) ? null : storeDir;
-		pb.environment().putAll(NativeCtadlCommand.storeEnv(store));
 		if (mergeStderr) {
 			// Fold stderr into stdout so the reader loop sees engine diagnostics — including the
 			// "Matched N sources and M sinks" line. Used for the query phase only.
@@ -50,7 +61,7 @@ public final class NativeCtadlRunner {
 		else {
 			pb.redirectError(Redirect.INHERIT);
 		}
-		log.accept("ctadl: " + String.join(" ", argv));
+		log.accept("ctadl: " + String.join(" ", fullArgv));
 		Process p = pb.start();
 		try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
 			String line;
