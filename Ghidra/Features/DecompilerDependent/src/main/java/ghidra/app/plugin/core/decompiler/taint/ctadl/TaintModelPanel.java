@@ -26,6 +26,7 @@ import docking.action.DockingAction;
 import docking.action.MenuData;
 import docking.action.ToolBarData;
 import docking.widgets.table.GTable;
+import generic.theme.GIcon;
 import ghidra.app.plugin.core.decompiler.taint.TaintPlugin;
 import ghidra.app.plugin.core.decompiler.taint.TaintPlugin.TaintFormat;
 import ghidra.app.plugin.core.decompiler.taint.TaintState;
@@ -169,6 +170,31 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 				"catch-all source so the sink's backward cone is computed. Apply the 'All tainted' " +
 				"highlight scope to see it.");
 		addLocalAction(exploreBack);
+
+		// Source -> sink query over the enabled model set: pairs the enabled source model(s) with
+		// the enabled sink model(s) (plus any active marks) and reports the flows between them. This
+		// is the "real" two-sided query complementing the one-sided forward/backward explorations
+		// above, and the model-set equivalent of the decompiler's marks-driven query — so it lives
+		// on this toolbar rather than the decompiler window.
+		DockingAction runQuery = new DockingAction("Run Query", plugin.getName()) {
+			@Override
+			public void actionPerformed(ActionContext context) {
+				runModelSetQuery();
+			}
+
+			@Override
+			public boolean isEnabledForContext(ActionContext context) {
+				CTADLTaintState state = currentState();
+				return state != null && state.hasEnabledSource() && state.hasEnabledSink();
+			}
+		};
+		runQuery.setToolBarData(
+			new ToolBarData(new GIcon("icon.plugin.decompiler.taint.default.query")));
+		runQuery.setPopupMenuData(new MenuData(new String[] { "Run query" }));
+		runQuery.setDescription("Run a source-to-sink taint query over the enabled model set: pairs " +
+			"the enabled source model(s) with the enabled sink model(s) and reports the flows " +
+			"between them. The model-set equivalent of the decompiler's marks-driven query.");
+		addLocalAction(runQuery);
 
 		// Pipeline: run the PCode fact export for the current program (the input to indexing).
 		// Same action as Tools > Source-Sink > Export PCode Facts, surfaced here so the whole
@@ -331,6 +357,50 @@ public class TaintModelPanel extends ComponentProviderAdapter {
 		}
 		plugin.getProvider().setTaint();
 		plugin.consoleMessage("backward exploration query complete");
+	}
+
+	/**
+	 * Runs a source-to-sink taint query over the currently enabled model set and displays the
+	 * result, mirroring {@link #runExploration()}. Delegates to {@link CTADLTaintState#queryIndex}
+	 * with {@link TaintState.QueryType#DEFAULT}, which pairs the enabled source model(s) (and any
+	 * active source marks) with the enabled sink model(s) (and any active sink marks). Model-set-wide,
+	 * not tied to the cursor — hence its home on this panel rather than the decompiler window.
+	 */
+	private void runModelSetQuery() {
+		CTADLTaintState state = currentState();
+		if (state == null) {
+			return;
+		}
+		Program program = plugin.getCurrentProgram();
+		if (program == null) {
+			Msg.showWarn(this, null, "No program", "Open a program before running a query.");
+			return;
+		}
+		PluginTool tool = plugin.getTool();
+
+		Task task = new Task("Taint query", true, true, true, true) {
+			@Override
+			public void run(TaskMonitor monitor) {
+				state.setMonitor(monitor);
+				state.queryIndex(program, tool, TaintState.QueryType.DEFAULT);
+				state.setMonitor(null);
+			}
+		};
+		tool.execute(task);
+
+		if (task.isCancelled()) {
+			plugin.consoleMessage("Taint query was cancelled.");
+			return;
+		}
+		TaintFormat format = state.getOptions().getTaintOutputForm();
+		if (!format.equals(TaintFormat.NONE)) {
+			SarifService sarifService = plugin.getSarifService();
+			sarifService.getController().setDefaultGraphHander(SarifTaintGraphRunHandler.class);
+			String queryName = state.getQueryName();
+			sarifService.showSarif(queryName != null ? queryName : "query", state.getData());
+		}
+		plugin.getProvider().setTaint();
+		plugin.consoleMessage("query complete");
 	}
 
 	/** Export all authored models to a chosen file in the engine CLI model-generator format. */

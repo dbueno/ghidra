@@ -134,9 +134,9 @@ public class TaintProvider extends ComponentProviderAdapter implements OptionsCh
 		setGroupInfo(taintModelAction, variableGroup, subGroupPosition++);
 
 		// These actions have an icon and a drop-down menu option in the decompiler window.
+		// The marks-driven source/sink query lives here (it is cursor-driven); the whole-enabled-
+		// model-set query lives on the Taint Models panel instead (see TaintModelPanel "Run Query").
 		TaintQueryAction taintQueryAction = new TaintQueryAction(plugin);
-		TaintQueryDefaultAction taintQueryDefaultAction =
-			new TaintQueryDefaultAction(plugin);
 		TaintQueryCustomAction taintQueryCustomAction = new TaintQueryCustomAction(plugin);
 		TaintLoadAction taintLoadAction = new TaintLoadAction(plugin);
 
@@ -177,7 +177,6 @@ public class TaintProvider extends ComponentProviderAdapter implements OptionsCh
 		provider.addLocalAction(taintSinkBySymbolAction);
 		provider.addLocalAction(taintGateAction);
 		provider.addLocalAction(taintQueryAction);
-		provider.addLocalAction(taintQueryDefaultAction);
 		provider.addLocalAction(taintQueryCustomAction);
 		provider.addLocalAction(taintLoadAction);
 		provider.addLocalAction(taintClearAction);
