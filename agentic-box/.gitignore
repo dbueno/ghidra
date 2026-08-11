@@ -1,0 +1,7 @@
+# Screenshots, logs and pidfiles the container writes. All disposable.
+state/
+
+# The repository root ignores /*/bin/ and *.lock, which would otherwise swallow
+# this directory's helper scripts and the pin that makes the image reproducible.
+!bin/
+!flake.lock

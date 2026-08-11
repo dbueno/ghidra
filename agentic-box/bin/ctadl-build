@@ -1,0 +1,55 @@
+#!/opt/box/env/bin/bash
+# Build the ctadl-rs workspace inside the container.
+#
+#   ctadl-build              # cargo build --workspace
+#   ctadl-build --release
+#   ctadl-build test         # cargo test --workspace
+#   ctadl-build check|clippy|fmt
+#   ctadl-build -- <args>    # raw cargo args
+#
+# target/ is a container-private volume, so a Linux build here never collides
+# with the macOS target/ at the same path on the host.
+#
+# For the *full* ctadl environment -- souffle, checksarif, parquet-tools,
+# graphviz, ghidra-bin -- use the tree's own flake, which works here because
+# this container has Nix:
+#
+#   nix develop /work/ctadl-rs
+set -euo pipefail
+
+. /etc/box/paths.sh
+cd "${CTADL_SRC:-/work/ctadl-rs}"
+
+# rust-toolchain.toml pins 1.94.1, which only rustup reads. There is no rustup
+# here; the flake supplies a nixpkgs rustc that satisfies the same edition and
+# resolver requirements. Tell cargo not to trip over the pin file.
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-}"
+
+echo "==> $(rustc --version), $(cargo --version)"
+echo "==> tree: $PWD"
+echo "==> CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}"
+
+# The Ghidra plugin's NativeCtadlCommand shells out to `ctadl`, so a build is
+# only half useful until the binary is on PATH. /root/.local/bin is on the
+# image's PATH and lives in the persistent home volume.
+link_binaries() {
+  local profile="$1" bin
+  mkdir -p /root/.local/bin
+  for bin in "${CARGO_TARGET_DIR:-$PWD/target}/$profile"/*; do
+    [ -f "$bin" ] && [ -x "$bin" ] || continue
+    case "$bin" in *.d|*.rlib|*.so) continue ;; esac
+    ln -sfn "$bin" "/root/.local/bin/$(basename "$bin")"
+  done
+  echo "==> linked into /root/.local/bin: $(command -v ctadl || echo '(no ctadl binary yet)')"
+}
+
+case "${1:-build}" in
+  test)   shift; exec cargo test --workspace "$@" ;;
+  check)  shift; exec cargo check --workspace "$@" ;;
+  clippy) shift; exec cargo clippy --workspace --all-targets "$@" ;;
+  fmt)    shift; exec cargo fmt --all "$@" ;;
+  --)     shift; exec cargo "$@" ;;
+  --release)
+          shift; cargo build --workspace --release "$@"; link_binaries release ;;
+  *)      cargo build --workspace "$@"; link_binaries debug ;;
+esac

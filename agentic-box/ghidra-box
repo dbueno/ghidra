@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# ghidra-box -- host-side driver for the agentic Ghidra/CTADL container.
+#
+# Lifecycle:
+#   ghidra-box build [--no-cache]   build the image from ./Containerfile
+#   ghidra-box up                   create + start the container (idempotent)
+#   ghidra-box down                 stop it (keeps the container and its caches)
+#   ghidra-box restart
+#   ghidra-box destroy [--volumes]  remove the container (and optionally caches)
+#   ghidra-box status               machine / container / display / bridge health
+#   ghidra-box smoke                prove display, capture, input and JVM work
+#
+# Work inside it:
+#   ghidra-box sh                   interactive shell
+#   ghidra-box exec CMD...          run a command
+#   ghidra-box ghidra-build         build Ghidra from the mounted tree
+#   ghidra-box ctadl-build          build ctadl-rs from the mounted tree
+#   ghidra-box ghidra start|stop|status|log
+#
+# Drive the GUI:
+#   ghidra-box shot [NAME]          screenshot -> ./state/shots/NAME.png (host path)
+#   ghidra-box click X Y
+#   ghidra-box gui <any gui subcommand>       (windows, type, key, drag, ...)
+#   ghidra-box bridge <ghidra-gui subcommand> (tree, find, invoke, menu, ...)
+#   ghidra-box vnc                  print the noVNC / VNC addresses
+#
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GHIDRA_SRC="$(cd "$HERE/.." && pwd)"
+# ctadl-rs is a symlink in the Ghidra tree; the container needs the real path.
+CTADL_SRC="$(cd "$GHIDRA_SRC/ctadl-rs" 2>/dev/null && pwd -P || true)"
+
+IMAGE="${BOX_IMAGE:-ghidra-box:latest}"
+NAME="${BOX_NAME:-ghidra-box}"
+MACHINE="${BOX_MACHINE:-ghidra-box}"
+# 5900 on the host is macOS Screen Sharing's; 5901 keeps out of its way.
+VNC_PORT="${BOX_VNC_PORT:-5901}"
+NOVNC_PORT="${BOX_NOVNC_PORT:-6080}"
+BRIDGE_PORT="${GUI_BRIDGE_PORT:-18217}"
+
+# podman came from `nix profile install nixpkgs#podman`, which is not on a
+# login PATH by default.
+export PATH="$HOME/.nix-profile/bin:$PATH"
+command -v podman >/dev/null || {
+  echo "ghidra-box: podman not found. Install it with:" >&2
+  echo "  nix profile install nixpkgs#podman nixpkgs#vfkit nixpkgs#gvproxy" >&2
+  exit 1
+}
+
+die() { printf 'ghidra-box: %s\n' "$*" >&2; exit 1; }
+
+ensure_machine() {
+  [ "$(uname -s)" = Darwin ] || return 0
+  local state
+  state="$(podman machine inspect "$MACHINE" --format '{{.State}}' 2>/dev/null || true)"
+  case "$state" in
+    running) ;;
+    "") die "podman machine '$MACHINE' does not exist. Create it with:
+  podman machine init $MACHINE --cpus 10 --memory 24576 --disk-size 160 \\
+      --volume $(dirname "$GHIDRA_SRC"):$(dirname "$GHIDRA_SRC") --now" ;;
+    *) echo "==> starting podman machine $MACHINE"; podman machine start "$MACHINE" ;;
+  esac
+}
+
+running() { [ "$(podman inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" = true ]; }
+exists()  { podman container exists "$NAME" 2>/dev/null; }
+
+need_up() { running || die "container '$NAME' is not running. Start it with: ghidra-box up"; }
+
+# Rewrite the two bind-mounted prefixes so every path this prints is one you can
+# open on the host -- screenshots especially.
+hostpaths() { sed -e "s|/work/state|$HERE/state|g" -e "s|/work/ghidra|$GHIDRA_SRC|g"; }
+
+# Bare `podman exec` gives a non-login shell with no /etc/profile.d, so source
+# the toolchain paths explicitly.
+inside() { podman exec "$@"; }
+
+cmd_up() {
+  ensure_machine
+  podman image exists "$IMAGE" || die "image $IMAGE not built. Run: ghidra-box build"
+  if running; then echo "already running"; return; fi
+  if exists; then podman start "$NAME" >/dev/null; echo "started $NAME"; return; fi
+
+  [ -n "$CTADL_SRC" ] || die "cannot resolve $GHIDRA_SRC/ctadl-rs"
+  mkdir -p "$HERE/state/shots" "$HERE/state/log"
+
+  echo "==> creating $NAME"
+  # Named volumes shadow every directory where a Linux build would otherwise
+  # overwrite the macOS one at the same path. Source stays a plain bind mount so
+  # edits made in here land in the working tree, which is the whole point.
+  podman run -d --name "$NAME" \
+    --hostname ghidra-box \
+    --shm-size=2g \
+    -p "127.0.0.1:${VNC_PORT}:5900" \
+    -p "127.0.0.1:${NOVNC_PORT}:6080" \
+    -p "127.0.0.1:${BRIDGE_PORT}:18227" \
+    -v "$GHIDRA_SRC:/work/ghidra" \
+    -v "$CTADL_SRC:/work/ctadl-rs" \
+    -v "$HERE/state:/work/state" \
+    -v "$HERE/bin:/opt/box/bin:ro" \
+    -v ghidra-box-home:/root \
+    -v ghidra-box-ghidra-build:/work/ghidra/build \
+    -v ghidra-box-ghidra-gradle:/work/ghidra/.gradle \
+    -v ghidra-box-ghidra-deps:/work/ghidra/dependencies \
+    -v ghidra-box-cargo-target:/work/ctadl-rs/target \
+    -e "GUI_BRIDGE_PORT=18217" \
+    -e "CARGO_TARGET_DIR=/work/ctadl-rs/target" \
+    -e "GRADLE_USER_HOME=/root/.gradle" \
+    "$IMAGE" >/dev/null
+
+  echo -n "==> waiting for the display "
+  for _ in $(seq 1 60); do
+    if podman exec "$NAME" xdpyinfo -display :99 >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n .; sleep 0.5
+  done
+  cmd_status
+}
+
+cmd_status() {
+  [ "$(uname -s)" = Darwin ] && \
+    echo "machine:   $MACHINE $(podman machine inspect "$MACHINE" --format '{{.State}}' 2>/dev/null || echo '(missing)')"
+  if running; then
+    echo "container: $NAME running"
+    echo "display:   $(podman exec "$NAME" sh -c 'xdpyinfo -display :99 2>/dev/null | awk "/dimensions:/{print \$2}"' || echo unknown)"
+    echo "windows:   $(podman exec "$NAME" sh -c 'wmctrl -l 2>/dev/null | wc -l' || echo 0)"
+    # Asked from inside, so the answer does not depend on the host-side port
+    # forward also being healthy.
+    local health
+    health="$(podman exec "$NAME" curl -fsS --max-time 3 http://127.0.0.1:18217/health 2>/dev/null || true)"
+    if [ -n "$health" ]; then
+      echo "bridge:    $health"
+      curl -fsS --max-time 3 "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1 \
+        && echo "           reachable from the host on 127.0.0.1:${BRIDGE_PORT}" \
+        || echo "           NOT reachable from the host on 127.0.0.1:${BRIDGE_PORT} (port forward down)"
+    else
+      echo "bridge:    not answering (Ghidra not started? ghidra-box ghidra start)"
+    fi
+    echo "novnc:     http://127.0.0.1:${NOVNC_PORT}/vnc.html"
+    echo "vnc:       vnc://127.0.0.1:${VNC_PORT}"
+  elif exists; then
+    echo "container: $NAME stopped"
+  else
+    echo "container: $NAME does not exist (ghidra-box up)"
+  fi
+}
+
+case "${1:-help}" in
+  build)
+    shift
+    ensure_machine
+    echo "==> building $IMAGE (this pulls the whole toolchain from nixpkgs; first run is slow)"
+    podman build "$@" -t "$IMAGE" -f "$HERE/Containerfile" "$HERE"
+    ;;
+
+  up)       shift; cmd_up "$@" ;;
+  status)   shift; cmd_status ;;
+  down)     shift; podman stop "$NAME" ;;
+  restart)  shift; podman restart "$NAME"; cmd_status ;;
+
+  destroy)
+    shift
+    podman rm -f "$NAME" 2>/dev/null || true
+    if [ "${1:-}" = --volumes ]; then
+      podman volume rm -f ghidra-box-home ghidra-box-ghidra-build \
+        ghidra-box-ghidra-gradle ghidra-box-ghidra-deps ghidra-box-cargo-target 2>/dev/null || true
+      echo "removed container and caches"
+    else
+      echo "removed container (caches kept; add --volumes to drop them)"
+    fi
+    ;;
+
+  sh|shell)
+    shift; need_up
+    exec podman exec -it -w /work "$NAME" bash -l
+    ;;
+
+  exec)
+    shift; need_up
+    # One argument is taken as a shell command line (so pipes, redirects and &
+    # work); several are taken as argv, so nothing needs re-quoting.
+    if [ $# -eq 1 ]; then
+      exec podman exec -i -w /work "$NAME" bash -lc "$1"
+    else
+      exec podman exec -i -w /work "$NAME" bash -lc 'exec "$@"' _ "$@"
+    fi
+    ;;
+
+  smoke)
+    shift; need_up
+    podman exec -i "$NAME" bash -lc 'box-smoke' | hostpaths
+    ;;
+
+  ghidra-build|ctadl-build)
+    c="$1"; shift; need_up
+    exec podman exec -i "$NAME" bash -lc "$c \"\$@\"" _ "$@"
+    ;;
+
+  ghidra)
+    shift; need_up
+    exec podman exec -i "$NAME" bash -lc 'ghidra-run "$@"' _ "$@"
+    ;;
+
+  gui)
+    shift; need_up
+    podman exec -i "$NAME" bash -lc 'gui "$@"' _ "$@" | hostpaths
+    ;;
+
+  bridge)
+    shift; need_up
+    exec podman exec -i "$NAME" bash -lc '/work/ghidra/agentic-gui/ghidra-gui "$@"' _ "$@"
+    ;;
+
+  shot)
+    shift; need_up
+    name="${1:-shot}"; shift || true
+    podman exec -i "$NAME" bash -lc 'gui shot "$@"' _ "$name" "$@" | hostpaths
+    ;;
+
+  click|dblclick|rightclick|move|drag|scroll|type|key|windows|activate|wait-window)
+    c="$1"; shift; need_up
+    podman exec -i "$NAME" bash -lc 'gui "$@"' _ "$c" "$@" | hostpaths
+    ;;
+
+  logs)
+    shift; need_up
+    podman exec "$NAME" sh -c 'tail -n 60 /work/state/log/*.log' 2>/dev/null || true
+    ;;
+
+  vnc)
+    echo "noVNC (browser):  http://127.0.0.1:${NOVNC_PORT}/vnc.html?autoconnect=1&resize=scale"
+    echo "VNC   (native):   vnc://127.0.0.1:${VNC_PORT}    (macOS: open that URL)"
+    ;;
+
+  help|*)
+    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+esac

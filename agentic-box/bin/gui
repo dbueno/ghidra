@@ -1,0 +1,208 @@
+#!/opt/box/env/bin/bash
+# Observe and drive the container's X display.
+#
+# This is the OS-level layer: real synthetic input through the X protocol and
+# real framebuffer capture. It sees anything on screen -- native menus, popups,
+# tooltips, drag feedback -- which the in-JVM bridge (agentic-gui/ghidra-gui)
+# cannot. The in-JVM layer is still the better tool for anything you can address
+# by component: it is deterministic and never races the window manager. Use both.
+#
+# Observe:
+#   gui size                        display geometry
+#   gui windows                     window list with geometry (wmctrl)
+#   gui shot [NAME|PATH] [scale=N%] capture the whole screen -> PNG, prints path
+#   gui shot-window PATTERN [NAME]  capture one window by title regex
+#   gui wait-window PATTERN [SECS]  block until a window title matches
+#   gui record OUT.mp4 SECS         record the screen
+#
+# Act:
+#   gui click X Y [BUTTON]          move and click (button 1/2/3, default 1)
+#   gui dblclick X Y
+#   gui rightclick X Y
+#   gui move X Y                    move the pointer only (hover, tooltips)
+#   gui drag X1 Y1 X2 Y2
+#   gui scroll up|down [COUNT]
+#   gui type TEXT...                type a string
+#   gui key KEYS...                 xdotool key syntax, e.g. ctrl+shift+e Return
+#   gui activate PATTERN            raise and focus a window by title regex
+#   gui close PATTERN               ask a window to close
+#
+# Coordinates are screen pixels, origin top-left. `gui windows` gives you the
+# geometry to compute them from.
+set -euo pipefail
+
+. /etc/box/paths.sh 2>/dev/null || true
+: "${DISPLAY:=:99}"
+: "${BOX_STATE:=/work/state}"
+export DISPLAY
+
+SHOTS="$BOX_STATE/shots"
+mkdir -p "$SHOTS"
+
+die() { printf 'gui: %s\n' "$*" >&2; exit 1; }
+
+# ImageMagick 7 renamed everything to `magick`; keep working either way.
+im() {
+  if command -v magick >/dev/null 2>&1; then magick "$@"
+  elif command -v convert >/dev/null 2>&1; then convert "$@"
+  else die "no ImageMagick (magick/convert) on PATH"
+  fi
+}
+
+# Resolve a bare name to $SHOTS/name.png; leave a path with a slash alone.
+outpath() {
+  local n="${1:-shot}"
+  case "$n" in
+    */*) printf '%s' "$n" ;;
+    *.png) printf '%s/%s' "$SHOTS" "$n" ;;
+    *) printf '%s/%s.png' "$SHOTS" "$n" ;;
+  esac
+}
+
+# xwd is the only capture path guaranteed to exist and it works identically for
+# the root window and for a single window, so everything funnels through it.
+capture() { # capture WINDOW_ID_OR_root OUT [scale]
+  local win="$1" out="$2" scale="${3:-}"
+  mkdir -p "$(dirname "$out")"
+  local args=(xwd:-)
+  [ -n "$scale" ] && args+=(-resize "$scale")
+  if [ "$win" = root ]; then
+    xwd -root -silent | im "${args[@]}" "png:$out"
+  else
+    xwd -id "$win" -silent | im "${args[@]}" "png:$out"
+  fi
+  printf '%s\n' "$out"
+}
+
+# First window whose title matches the extended regex, as a hex X window id.
+findwin() { # findwin PATTERN
+  local id
+  id="$(xdotool search --name "$1" 2>/dev/null | tail -1 || true)"
+  [ -n "$id" ] || die "no window matching /$1/ (try: gui windows)"
+  printf '%s' "$id"
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  size)
+    xdpyinfo | awk '/dimensions:/ {print $2}'
+    ;;
+
+  windows)
+    # id, desktop, x, y, w, h, host, title
+    wmctrl -lG || true
+    ;;
+
+  shot)
+    name="shot"; scale=""
+    for a in "$@"; do
+      case "$a" in
+        scale=*) scale="${a#scale=}" ;;
+        *) name="$a" ;;
+      esac
+    done
+    capture root "$(outpath "$name")" "$scale"
+    ;;
+
+  shot-window)
+    [ $# -ge 1 ] || die "usage: gui shot-window PATTERN [NAME] [scale=N%]"
+    pat="$1"; shift
+    name="window"; scale=""
+    for a in "$@"; do
+      case "$a" in
+        scale=*) scale="${a#scale=}" ;;
+        *) name="$a" ;;
+      esac
+    done
+    capture "$(findwin "$pat")" "$(outpath "$name")" "$scale"
+    ;;
+
+  wait-window)
+    [ $# -ge 1 ] || die "usage: gui wait-window PATTERN [SECS]"
+    pat="$1"; secs="${2:-60}"
+    end=$(( $(date +%s) + secs ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      if xdotool search --name "$pat" >/dev/null 2>&1; then
+        printf 'matched: %s\n' "$(wmctrl -l | grep -E "$pat" | head -1)"
+        exit 0
+      fi
+      sleep 0.4
+    done
+    die "timed out after ${secs}s waiting for a window matching /$pat/"
+    ;;
+
+  record)
+    [ $# -ge 2 ] || die "usage: gui record OUT.mp4 SECS"
+    out="$1"; secs="$2"
+    case "$out" in */*) ;; *) out="$SHOTS/$out" ;; esac
+    ffmpeg -loglevel error -y -f x11grab -framerate 15 \
+      -video_size "$(xdpyinfo | awk '/dimensions:/ {print $2}')" \
+      -i "$DISPLAY" -t "$secs" -pix_fmt yuv420p "$out"
+    printf '%s\n' "$out"
+    ;;
+
+  click|dblclick|rightclick)
+    [ $# -ge 2 ] || die "usage: gui $cmd X Y [BUTTON]"
+    x="$1"; y="$2"; btn="${3:-1}"
+    [ "$cmd" = rightclick ] && btn=3
+    reps=1; [ "$cmd" = dblclick ] && reps=2
+    xdotool mousemove --sync "$x" "$y"
+    xdotool click --repeat "$reps" --delay 80 "$btn"
+    printf 'ok %s at %s,%s button %s\n' "$cmd" "$x" "$y" "$btn"
+    ;;
+
+  move)
+    [ $# -ge 2 ] || die "usage: gui move X Y"
+    xdotool mousemove --sync "$1" "$2"
+    printf 'ok move to %s,%s\n' "$1" "$2"
+    ;;
+
+  drag)
+    [ $# -ge 4 ] || die "usage: gui drag X1 Y1 X2 Y2"
+    xdotool mousemove --sync "$1" "$2" mousedown 1
+    # A couple of intermediate moves: some Swing drag handlers ignore a single
+    # teleport because they never see a drag threshold crossed.
+    xdotool mousemove --sync $(( ($1 + $3) / 2 )) $(( ($2 + $4) / 2 ))
+    xdotool mousemove --sync "$3" "$4" mouseup 1
+    printf 'ok drag %s,%s -> %s,%s\n' "$1" "$2" "$3" "$4"
+    ;;
+
+  scroll)
+    dir="${1:-down}"; count="${2:-3}"
+    case "$dir" in up) btn=4 ;; down) btn=5 ;; left) btn=6 ;; right) btn=7 ;; *) die "scroll up|down|left|right" ;; esac
+    xdotool click --repeat "$count" --delay 60 "$btn"
+    printf 'ok scroll %s x%s\n' "$dir" "$count"
+    ;;
+
+  type)
+    [ $# -ge 1 ] || die "usage: gui type TEXT"
+    text="$*"
+    xdotool type --delay 25 -- "$text"
+    printf 'ok typed %s chars\n' "${#text}"
+    ;;
+
+  key)
+    [ $# -ge 1 ] || die "usage: gui key KEYS... (e.g. ctrl+shift+e, Return)"
+    xdotool key --delay 60 -- "$@"
+    printf 'ok key %s\n' "$*"
+    ;;
+
+  activate)
+    [ $# -ge 1 ] || die "usage: gui activate PATTERN"
+    id="$(findwin "$1")"
+    xdotool windowactivate --sync "$id" || wmctrl -i -a "$id"
+    printf 'ok activated %s\n' "$id"
+    ;;
+
+  close)
+    [ $# -ge 1 ] || die "usage: gui close PATTERN"
+    xdotool windowclose "$(findwin "$1")"
+    printf 'ok closed\n'
+    ;;
+
+  help|*)
+    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+esac

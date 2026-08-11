@@ -1,0 +1,120 @@
+# ghidra-box: a Linux container that can build and *run* Ghidra and ctadl-rs,
+# with a real X display an agent can screenshot and click on.
+#
+# Why a container at all: on macOS a JVM started from a background shell is
+# headless and cannot open windows, and the Robot-based input/capture paths are
+# gated behind TCC (Accessibility / Screen Recording) prompts a background agent
+# cannot answer. Inside this container there is a genuine X server that the
+# agent owns outright, so screenshots and synthetic input need no permission
+# from anybody.
+#
+# Reproducibility: every tool comes from ./flake.nix, pinned to the same nixpkgs
+# revision as the rest of this tree. The base image is pinned by digest. What is
+# *not* reproducible is Gradle's and Cargo's own dependency resolution at run
+# time -- those reach the network, exactly as they do on the host.
+#
+#   ./ghidra-box build
+#
+FROM docker.io/nixos/nix@sha256:377d4887aca98f0dfa12971c1ea6d6a625a435d8b610d4c95a436843da6fbfd1
+
+# Set up front so every RUN below sees the toolchain once it exists. The nix
+# profile paths keep working before that, so the `nix build` step is unaffected.
+#
+# BASH_ENV is the one hook that fires for a *non-interactive* bash, which is what
+# `podman exec ... bash -c` gets: no profile, no rc file. With it, JAVA_HOME and
+# friends are present however a command finds its way in here.
+#
+# SSL_CERT_FILE / NIX_SSL_CERT_FILE are deliberately left as the base image set
+# them. Repointing them at /opt/box/env breaks the very `nix build` that creates
+# /opt/box/env, and the base image's cacert is in the image already anyway.
+ENV PATH=/opt/box/bin:/opt/box/env/bin:/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin \
+    HOME=/root \
+    LANG=C.UTF-8 \
+    DISPLAY=:99 \
+    SCREEN_GEOMETRY=1920x1080x24 \
+    VNC_PORT=5900 \
+    NOVNC_PORT=6080 \
+    GUI_BRIDGE_PORT=18217 \
+    GHIDRA_SRC=/work/ghidra \
+    CTADL_SRC=/work/ctadl-rs \
+    BOX_STATE=/work/state \
+    PROTOC=/opt/box/env/bin/protoc \
+    BASH_ENV=/etc/box/paths.sh
+
+# Flakes, and a build that does not assume a TTY it does not have.
+RUN mkdir -p /etc/nix \
+ && printf '%s\n' \
+      'experimental-features = nix-command flakes' \
+      'max-jobs = auto' \
+      'cores = 0' \
+      'sandbox = false' \
+      'filter-syscalls = false' \
+    >> /etc/nix/nix.conf
+
+# The toolchain, as one buildEnv. Copying only the flake means this layer stays
+# cached until the flake itself changes.
+COPY flake.nix flake.lock /opt/box/src/
+RUN nix build --print-build-logs /opt/box/src#toolchain --out-link /opt/box/env
+
+# Record the paths that are only knowable once the toolchain is realised, so
+# nothing downstream has to guess a /nix/store hash. Written with shell builtins
+# only: the base image's /bin/sh has no sed, and this runs before the toolchain
+# is guaranteed to be on PATH.
+RUN mkdir -p /etc/box \
+ && javac="$(readlink -f /opt/box/env/bin/javac)" \
+ && test -n "$javac" \
+ && { \
+      echo "export JAVA_HOME=${javac%/bin/javac}"; \
+      echo "export XKB_CONFIG_ROOT=/opt/box/env/share/X11/xkb"; \
+      echo "export NOVNC_ROOT=$(readlink -f /opt/box/env/share/webapps/novnc)"; \
+    } > /etc/box/paths.sh \
+ && cat /etc/box/paths.sh \
+ && . /etc/box/paths.sh && test -x "$JAVA_HOME/bin/java"
+
+# A dynamic loader at its FHS address. Gradle and Cargo both download prebuilt
+# ELF helpers now and then; without /lib/ld-linux-*.so.* those die with a bare
+# "No such file or directory" that looks nothing like the missing-loader problem
+# it is. This is the one deliberate impurity in the image.
+RUN set -eu; \
+    loader="$(find /nix/store -maxdepth 4 -name 'ld-linux-*.so.*' -path '*glibc*/lib/*' | head -1)"; \
+    test -n "$loader"; \
+    mkdir -p /lib /lib64; \
+    ln -sfn "$loader" "/lib/$(basename "$loader")"; \
+    ln -sfn "$loader" "/lib64/$(basename "$loader")"
+
+# Fontconfig, or every Swing label in Ghidra renders as a row of boxes.
+RUN mkdir -p /etc/fonts /var/cache/fontconfig \
+ && printf '%s\n' \
+      '<?xml version="1.0"?>' \
+      '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">' \
+      '<fontconfig>' \
+      '  <dir>/opt/box/env/share/fonts</dir>' \
+      '  <cachedir>/var/cache/fontconfig</cachedir>' \
+      '  <include ignore_missing="yes">/opt/box/env/etc/fonts/conf.d</include>' \
+      '</fontconfig>' \
+    > /etc/fonts/fonts.conf \
+ && fc-cache -f \
+ && fc-list | wc -l
+
+# Interactive `ghidra-box sh` sessions get the same environment.
+RUN mkdir -p /etc/profile.d \
+ && printf '%s\n' \
+      '. /etc/box/paths.sh' \
+      'export PS1="[ghidra-box \w]\$ "' \
+    > /etc/profile.d/ghidra-box.sh \
+ && cat /etc/profile.d/ghidra-box.sh >> /root/.bashrc
+
+# Baked in so the image runs standalone; ./ghidra-box up bind-mounts the host
+# copy over this one so the scripts can be edited without a rebuild.
+COPY bin/ /opt/box/bin/
+RUN chmod +x /opt/box/bin/* && mkdir -p /work/state/shots /work/state/log /root/.local/bin
+
+# Where ctadl-build links the binaries it produces, so the Ghidra plugin's
+# NativeCtadlCommand can find `ctadl` on PATH. Appended here rather than in the
+# ENV block above so editing it does not invalidate the toolchain layer.
+ENV PATH=/root/.local/bin:$PATH
+
+WORKDIR /work
+EXPOSE 5900 6080 18217
+ENTRYPOINT ["/opt/box/bin/box-entrypoint"]
+CMD ["supervise"]

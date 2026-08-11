@@ -1,0 +1,117 @@
+#!/opt/box/env/bin/bash
+# Bring up the container's display stack, then either hold it open or run a
+# command against it.
+#
+#   box-entrypoint supervise      # start X + WM + VNC, then block (the default)
+#   box-entrypoint <cmd> [args]   # start X + WM + VNC, then exec <cmd>
+#
+# Everything here is idempotent-ish and logs to $BOX_STATE/log, which is
+# bind-mounted back to the host so a failed start is readable from outside.
+set -euo pipefail
+
+. /etc/box/paths.sh
+
+: "${DISPLAY:=:99}"
+: "${SCREEN_GEOMETRY:=1920x1080x24}"
+: "${VNC_PORT:=5900}"
+: "${NOVNC_PORT:=6080}"
+: "${BOX_STATE:=/work/state}"
+export DISPLAY
+
+LOG="$BOX_STATE/log"
+mkdir -p "$LOG" "$BOX_STATE/shots"
+
+log() { printf '[box] %s\n' "$*" >&2; }
+
+pids=()
+spawn() { # spawn NAME cmd...
+  local name="$1"
+  shift
+  "$@" >"$LOG/$name.log" 2>&1 &
+  pids+=("$!")
+  log "started $name (pid $!) -> $LOG/$name.log"
+}
+
+shutdown() {
+  log "shutting down"
+  for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null || true; done
+  wait 2>/dev/null || true
+}
+trap shutdown EXIT INT TERM
+
+# --- X ----------------------------------------------------------------------
+# -ac disables host access control: the only clients are inside this container,
+# and it saves every helper from having to carry an Xauthority.
+if ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+  spawn Xvfb Xvfb "$DISPLAY" \
+    -screen 0 "$SCREEN_GEOMETRY" \
+    -nolisten tcp -ac \
+    +extension RANDR +extension GLX +extension RENDER \
+    -xkbdir "${XKB_CONFIG_ROOT:-/opt/box/env/share/X11/xkb}"
+
+  for _ in $(seq 1 100); do
+    xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 || {
+    log "FATAL: X server never came up; see $LOG/Xvfb.log"
+    exit 1
+  }
+  log "X is up on $DISPLAY ($SCREEN_GEOMETRY)"
+else
+  log "X already running on $DISPLAY"
+fi
+
+# --- window manager ---------------------------------------------------------
+# Ghidra's docking framework and its modal dialogs both behave better with a
+# real WM: without one nothing ever gets focus, and `wmctrl` has no window list
+# to report because no window carries the EWMH properties it reads.
+if ! pgrep -x fluxbox >/dev/null 2>&1; then
+  mkdir -p "$HOME/.fluxbox"
+  # Focus follows the click, and new windows are raised and focused -- which is
+  # what a synthetic click sequence assumes.
+  cat >"$HOME/.fluxbox/init" <<'FB'
+session.screen0.focusModel: ClickToFocus
+session.screen0.focusNewWindows: true
+session.screen0.workspaces: 1
+session.screen0.toolbar.visible: false
+session.screen0.defaultDeco: NORMAL
+FB
+  spawn fluxbox fluxbox
+  sleep 0.5
+fi
+
+# --- remote viewing ---------------------------------------------------------
+# Read-write on purpose: the point is that a human can take over the same
+# session the agent is driving. Nothing is exposed beyond localhost on the host
+# side, because ./ghidra-box up publishes these ports on 127.0.0.1 only.
+if [ "${BOX_VNC:-1}" = 1 ] && ! pgrep -x x11vnc >/dev/null 2>&1; then
+  spawn x11vnc x11vnc \
+    -display "$DISPLAY" -rfbport "$VNC_PORT" \
+    -forever -shared -nopw -noxdamage -repeat -xkb
+  if [ -d "${NOVNC_ROOT:-}" ]; then
+    spawn novnc websockify --web="$NOVNC_ROOT" "$NOVNC_PORT" "localhost:$VNC_PORT"
+  else
+    log "note: novnc web root not found ($NOVNC_ROOT); VNC still on :$VNC_PORT"
+  fi
+fi
+
+# --- make the bridge reachable from the host --------------------------------
+# The bridge binds 127.0.0.1, but a published container port maps to eth0, so
+# without this hop `curl 127.0.0.1:18217` on the macOS host gets an empty reply.
+: "${BRIDGE_EXT_PORT:=18227}"
+if ! pgrep -f box-portfwd >/dev/null 2>&1; then
+  spawn portfwd box-portfwd "$BRIDGE_EXT_PORT" "${GUI_BRIDGE_PORT:-18217}"
+fi
+
+# --- hand off ---------------------------------------------------------------
+if [ "${1:-supervise}" = supervise ]; then
+  log "ready. DISPLAY=$DISPLAY  vnc=:$VNC_PORT  novnc=:$NOVNC_PORT"
+  # Block on the X server: if it dies the container should die with it rather
+  # than sit there accepting exec's into a session with no display.
+  wait -n "${pids[0]}"
+  log "X server exited; stopping"
+  exit 1
+else
+  exec "$@"
+fi

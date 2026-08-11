@@ -1,0 +1,74 @@
+#!/opt/box/env/bin/bash
+# Prove the four things this container exists to provide, in order, and fail
+# loudly on the first one that does not hold:
+#
+#   1. there is an X display
+#   2. it can be captured
+#   3. synthetic input reaches a real window
+#   4. the JVM on it is not headless   (only if Ghidra has been built)
+#
+#   box-smoke
+set -uo pipefail
+
+. /etc/box/paths.sh 2>/dev/null || true
+: "${DISPLAY:=:99}"
+: "${BOX_STATE:=/work/state}"
+export DISPLAY
+
+fails=0
+ok()   { printf '  ok    %s\n' "$*"; }
+bad()  { printf '  FAIL  %s\n' "$*"; fails=$((fails + 1)); }
+
+echo "1. display"
+if geom="$(xdpyinfo | awk '/dimensions:/ {print $2}')" && [ -n "$geom" ]; then
+  ok "X is up on $DISPLAY at $geom"
+else
+  bad "no X server on $DISPLAY"; exit 1
+fi
+pgrep -x fluxbox >/dev/null && ok "window manager running" || bad "no window manager"
+
+echo "2. capture"
+shot="$BOX_STATE/shots/smoke.png"
+if gui shot smoke >/dev/null && [ -s "$shot" ]; then
+  ok "captured $(du -h "$shot" | cut -f1) -> $shot"
+else
+  bad "screen capture produced nothing"
+fi
+
+echo "3. synthetic input"
+# xmessage is the smallest real X client that has a button worth clicking.
+setsid xmessage -geometry 600x260+300+200 "ghidra-box smoke test" >/dev/null 2>&1 &
+sleep 2
+if wmctrl -l | grep -q xmessage; then
+  ok "test window mapped"
+  # The okay button sits just inside the bottom-left corner of the frame.
+  gui click 321 471 >/dev/null
+  sleep 1
+  if wmctrl -l | grep -q xmessage; then
+    bad "click did not dismiss the test window"
+    xdotool search --name xmessage | while read -r w; do xdotool windowkill "$w"; done
+  else
+    ok "click reached the window and dismissed it"
+  fi
+else
+  bad "test window never appeared"
+fi
+
+echo "4. jvm"
+if ls -d "${GHIDRA_SRC:-/work/ghidra}"/build/dist/ghidra_* >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:${GUI_BRIDGE_PORT:-18217}/health" 2>/dev/null | grep -q '"headless": *false'; then
+    ok "Ghidra's bridge reports headless=false"
+  else
+    printf '  skip  Ghidra is not running (ghidra-run start)\n'
+  fi
+else
+  printf '  skip  no distribution yet (ghidra-build)\n'
+fi
+
+echo
+if [ "$fails" -eq 0 ]; then
+  echo "smoke: all checks passed"
+else
+  echo "smoke: $fails check(s) failed"
+fi
+exit "$fails"

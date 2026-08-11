@@ -1,0 +1,145 @@
+#!/opt/box/env/bin/bash
+# Run the locally built Ghidra on the container's X display, with the in-JVM
+# automation bridge attached.
+#
+#   ghidra-run start     # launch in the background, wait for the bridge
+#   ghidra-run stop
+#   ghidra-run restart
+#   ghidra-run status
+#   ghidra-run log       # tail the launch log
+#   ghidra-run fg        # run in the foreground (for debugging a crash)
+#
+# Two automation layers are live once this is up:
+#   * in-JVM, deterministic:  agentic-gui/ghidra-gui <cmd>   (HTTP, port 18217)
+#   * OS-level, sees everything: gui shot / gui click ...     (X11)
+# Unlike on macOS, the JVM here is not headless and the Robot endpoints
+# (/click, /type, /key, /screenshot?robot=true) work with no TCC prompt.
+set -euo pipefail
+
+. /etc/box/paths.sh
+
+SRC="${GHIDRA_SRC:-/work/ghidra}"
+PORT="${GUI_BRIDGE_PORT:-18217}"
+STATE="${BOX_STATE:-/work/state}"
+LOG="$STATE/log/ghidra.log"
+PIDFILE="$STATE/ghidra.pid"
+AGENT_JAR="$SRC/agentic-gui/build/ghidra-gui-bridge.jar"
+export DISPLAY="${DISPLAY:-:99}"
+
+mkdir -p "$STATE/log"
+
+# Track the JVM, not the launcher. `ghidraRun` is a shell script that hands off
+# to java and exits, so the pid we recorded at launch is dead within a second --
+# trusting it made `stop` a no-op and left `restart` with two Ghidras running,
+# the second of which silently loses the bridge port to the first.
+ghidra_pids() { pgrep -f 'ghidra\.GhidraRun' 2>/dev/null || true; }
+running() { [ -n "$(ghidra_pids)" ]; }
+
+find_dist() {
+  local d
+  d="$(ls -d "$SRC"/build/dist/ghidra_* 2>/dev/null | head -1 || true)"
+  [ -n "$d" ] || {
+    echo "ERROR: no distribution under $SRC/build/dist. Run ghidra-build first." >&2
+    exit 1
+  }
+  printf '%s' "$d"
+}
+
+prepare() {
+  if [ ! -f "$AGENT_JAR" ]; then
+    echo "==> building the GUI bridge agent"
+    "$SRC/agentic-gui/build-agent.sh"
+  fi
+  DIST="$(find_dist)"
+  echo "==> distribution: $DIST"
+
+  # Idempotently inject the javaagent, and pin the JDK to the Nix one so the
+  # launcher does not go hunting for a system Java that does not exist here.
+  local props="$DIST/support/launch.properties"
+  local marker="# --- ghidra-gui-bridge (agentic testing) ---"
+  if ! grep -qF "$marker" "$props"; then
+    {
+      echo ""
+      echo "$marker"
+      echo "JAVA_HOME_OVERRIDE=${JAVA_HOME}"
+      echo "VMARGS=-javaagent:${AGENT_JAR}=port=${PORT}"
+    } >>"$props"
+    echo "==> injected -javaagent into $props (port $PORT)"
+  fi
+}
+
+wait_for_bridge() {
+  echo -n "==> waiting for the bridge on 127.0.0.1:$PORT "
+  for _ in $(seq 1 180); do
+    if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+      echo
+      curl -fsS "http://127.0.0.1:$PORT/health" | jq . 2>/dev/null \
+        || curl -fsS "http://127.0.0.1:$PORT/health"
+      return 0
+    fi
+    echo -n .
+    sleep 1
+  done
+  echo
+  echo "ERROR: bridge never answered. Last 40 lines of $LOG:" >&2
+  tail -40 "$LOG" >&2 || true
+  return 1
+}
+
+case "${1:-start}" in
+  start)
+    running && { echo "already running (pid $(ghidra_pids | tr '\n' ' '))"; exit 0; }
+    prepare
+    echo "==> launching on DISPLAY=$DISPLAY (log: $LOG)"
+    setsid "$DIST/ghidraRun" >"$LOG" 2>&1 &
+    echo $! >"$PIDFILE"
+    wait_for_bridge
+    ;;
+
+  fg)
+    prepare
+    exec "$DIST/ghidraRun"
+    ;;
+
+  stop)
+    if ! running; then
+      rm -f "$PIDFILE"
+      echo "not running"
+      exit 0
+    fi
+    # SIGTERM, then SIGKILL for whatever is left. Verified rather than assumed:
+    # a half-dead Ghidra still owns the bridge port, and the next `start` would
+    # come up mute with no hint as to why.
+    kill $(ghidra_pids) 2>/dev/null || true
+    for _ in $(seq 1 20); do running || break; sleep 0.5; done
+    if running; then
+      kill -9 $(ghidra_pids) 2>/dev/null || true
+      for _ in $(seq 1 20); do running || break; sleep 0.5; done
+    fi
+    rm -f "$PIDFILE"
+    if running; then
+      echo "ERROR: Ghidra survived SIGKILL (pids: $(ghidra_pids | tr '\n' ' '))" >&2
+      exit 1
+    fi
+    echo "stopped"
+    ;;
+
+  restart)
+    "$0" stop
+    "$0" start
+    ;;
+
+  status)
+    if running; then echo "process: running (pid $(ghidra_pids | tr '\n' ' '))"; else echo "process: not running"; fi
+    curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null && echo || echo "bridge: not answering on $PORT"
+    wmctrl -l 2>/dev/null || true
+    ;;
+
+  log)
+    tail -f "$LOG"
+    ;;
+
+  *)
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+esac

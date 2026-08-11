@@ -1,0 +1,86 @@
+#!/opt/box/env/bin/bash
+# Build Ghidra from the mounted source tree, inside the container.
+#
+#   ghidra-build              # fetch deps (once) + assembleAll
+#   ghidra-build --deps       # only fetch the non-Maven-Central dependencies
+#   ghidra-build --clean      # clean first
+#   ghidra-build <task>...    # run arbitrary Gradle tasks with the same setup
+#
+# Output: $GHIDRA_SRC/build/dist/ghidra_<version>_DEV, which is a container-only
+# volume -- it never touches the macOS distribution in the same path on the host.
+set -euo pipefail
+
+. /etc/box/paths.sh
+cd "${GHIDRA_SRC:-/work/ghidra}"
+
+echo "==> Java:   $(java -version 2>&1 | head -1)"
+echo "==> Gradle: $(gradle --version | awk '/^Gradle/{print $2}')"
+echo "==> Tree:   $PWD"
+
+# Ghidra does not use the protobuf-gradle-plugin: gradle/hasProtobuf.gradle
+# downloads a prebuilt protoc from Maven Central and execs it. That binary is a
+# plain glibc/FHS ELF and will not run in a Nix container. Rather than patch the
+# source tree, repoint the Exec task at the protoc from ./flake.nix -- the same
+# fix nixpkgs' ghidra derivation applies, expressed as an init script so the
+# checkout stays pristine. protobuf_31 is deliberate: it matches
+# gradle.properties' ghidra.protobuf.java.version (4.31.0), and a newer protoc
+# emits code that runtime cannot compile.
+INIT="$(mktemp -t protoc-init-XXXXXX.gradle)"
+trap 'rm -f "$INIT"' EXIT
+cat >"$INIT" <<'GRADLE'
+def protoc = System.getenv('PROTOC')
+if (protoc) {
+    gradle.allprojects { p ->
+        p.tasks.matching { it.name == 'configureGenerateProto' }.all { cfg ->
+            cfg.doLast {
+                def gp = p.tasks.getByName('generateProto')
+                // Replace the command line wholesale; Ghidra's own doLast has
+                // already appended the source files, and setting commandLine
+                // resets args so they are not duplicated.
+                def cl = [protoc, "--java_out=${gp.outdir}", "-I${gp.srcdir}"]
+                cl.addAll(gp.src.files.collect { it.absolutePath })
+                gp.commandLine(cl)
+                logger.lifecycle("ghidra-box: generateProto for ${p.path} -> ${protoc}")
+            }
+        }
+    }
+}
+GRADLE
+
+GRADLE_ARGS=(-I "$INIT")
+
+# Gradle's cross-platform native tasks: on a Linux arm64 host gcc cannot target
+# x86_64, so ask for the current platform only. `currentPlatformName` is the
+# property GPL/nativePlatforms.gradle reads.
+GRADLE_ARGS+=(-PcurrentPlatformName=linux_arm_64)
+[ "$(uname -m)" = "x86_64" ] && GRADLE_ARGS=("${GRADLE_ARGS[@]/-PcurrentPlatformName=linux_arm_64/-PcurrentPlatformName=linux_x86_64}")
+
+case "${1:-}" in
+  --deps)
+    exec gradle "${GRADLE_ARGS[@]}" -I gradle/support/fetchDependencies.gradle
+    ;;
+  --clean)
+    shift
+    gradle "${GRADLE_ARGS[@]}" clean
+    ;;
+esac
+
+if [ $# -gt 0 ]; then
+  exec gradle "${GRADLE_ARGS[@]}" "$@"
+fi
+
+# fetchDependencies is a one-time network step; its marker is the populated
+# dependencies/ directory (a container-private volume).
+if [ ! -d dependencies/flatRepo ] || [ -z "$(ls -A dependencies/flatRepo 2>/dev/null)" ]; then
+  echo "==> Step 1/2: fetch non-Maven-Central dependencies"
+  gradle "${GRADLE_ARGS[@]}" -I gradle/support/fetchDependencies.gradle
+else
+  echo "==> Step 1/2: dependencies/ already populated, skipping fetch"
+  echo "    (force with: ghidra-build --deps)"
+fi
+
+echo "==> Step 2/2: assembleAll"
+gradle "${GRADLE_ARGS[@]}" assembleAll
+
+echo "==> Build complete. Distribution:"
+ls -d build/dist/*/ 2>/dev/null || ls build/dist

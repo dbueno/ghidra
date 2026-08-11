@@ -1,117 +1,83 @@
-# Building Ghidra with Nix + Agentic GUI Testing
+# The Ghidra GUI bridge
 
-Two things live here:
+A tiny in-JVM javaagent that lets an automation agent observe and drive Ghidra's
+live Swing GUI over localhost HTTP.
 
-1. A **Nix build** of *this* Ghidra source tree (JDK + Gradle come entirely from
-   Nix — no system Java required).
-2. An **agentic GUI test harness**: a tiny in-JVM bridge that lets an automation
-   agent observe and drive Ghidra's live Swing GUI over localhost HTTP.
+**It runs in the container.** Everything about launching Ghidra, capturing the
+screen and generating input lives in [`../agentic-box/`](../agentic-box/README.md);
+this directory is just the bridge itself and its CLI wrapper. Start there:
+
+```sh
+agentic-box/ghidra-box build
+agentic-box/ghidra-box up
+agentic-box/ghidra-box ghidra-build
+agentic-box/ghidra-box ghidra start     # builds this agent, injects it, launches
+```
+
+The container is the whole GUI story on this branch. It replaced a macOS-native
+arrangement — a generated `.app` bundle, because a JVM started from a background
+shell on macOS is headless and cannot open a window — that could never make the
+Robot layer work, since real input and real screen capture are gated behind
+Accessibility and Screen Recording prompts a background agent cannot answer.
+Inside a Linux container there is an X server the agent owns outright, and both
+problems simply do not exist.
 
 ---
 
-## 1. Building Ghidra with Nix
+## Driving it
 
-Java and Gradle are provided by Nix, pinned to the nixpkgs revision whose
-`ghidra` package is exactly 12.1.2 (matching `Ghidra/application.properties`).
-
-### Dev-shell build (fast, iterative)
+`agentic-gui/ghidra-gui` wraps the HTTP API. Inside the container it is on
+`PATH`; from the host, `ghidra-box bridge <subcommand>` is the same thing.
 
 ```sh
-nix-shell --run ./build-ghidra.sh
+ghidra-box bridge health                 # bridge up? AWT showing? how many windows?
+ghidra-box bridge windows                # list top-level windows
+ghidra-box bridge tree [WINDOW_INDEX]    # Swing component tree: class/name/text/bounds
+ghidra-box bridge find "I Agree"         # locate components by text (and/or class)
+ghidra-box bridge shot out.png window=4  # render a window/component to PNG
+
+# In-JVM actions:
+ghidra-box bridge invoke id=6            # Swing doClick / dispatch a click
+ghidra-box bridge invoke text="I Agree"
+ghidra-box bridge invoke id=9 x=40 y=12 clicks=2   # double-click a point *inside* a component
+ghidra-box bridge invoke id=6 async=true           # don't block if the click opens a modal dialog
+ghidra-box bridge settext id=7 "main"    # set a text field
+ghidra-box bridge focus id=7
+
+# Drive Ghidra's own UI:
+ghidra-box bridge menu "File>Configure..."   # walk the in-frame menu bar and fire an item
+ghidra-box bridge gaction "Load SARIF file"  # invoke a Ghidra DockingAction by name
+ghidra-box bridge raise                      # bring the main window to the front
+
+# Robot actions — real OS-level input, and in the container they need no
+# permission from anyone:
+ghidra-box bridge click id=6
+ghidra-box bridge typetext "main"
+ghidra-box bridge press "ctrl shift E"
 ```
 
-- `shell.nix` — dev shell with `jdk21`, `gradle 8.14.4`, `python3` (+pip/build),
-  `protobuf`. It's an *impure* shell, so the system Apple `clang` toolchain is
-  still available for the native decompiler, and Gradle can fetch dependencies.
-- `build-ghidra.sh` — runs `gradle -I gradle/support/fetchDependencies.gradle`
-  then `gradle assembleAll`, excluding the x86_64 decompiler binaries on Apple
-  silicon (they're unnecessary for an arm64 build and fail to link).
-- Output: `build/dist/ghidra_12.1.2_DEV/` — a runnable distribution.
+The bridge is also published on the host at `127.0.0.1:18217`, so plain `curl`
+works from any macOS shell.
 
-> Tip: if a build fails with a stale-environment error (e.g. *"No module named
-> pip"* even though pip is present), a leftover Gradle **daemon** captured the
-> old `PATH`. Run `gradle --stop` inside the shell and rebuild.
-
-### Reproducible package/derivation
-
-`default.nix` builds Ghidra from this checkout as a proper Nix package. It reuses
-nixpkgs' from-source `ghidra` derivation — which already solves offline Gradle
-dependency resolution (pinned `deps.json` + `mitmCache`) — and only swaps in this
-tree as `src`:
-
-```sh
-nix-build            # -> ./result/bin/ghidra
-./result/bin/ghidra  # launch
-```
-
-`flake.nix` exposes the same as `packages.default`, `devShells.default`, and
-`apps.default` (`nix build` / `nix develop` / `nix run`).
-
----
-
-## 2. Agentic GUI testing
-
-macOS note: a JVM started from a non-GUI/background shell is **headless** and
-cannot open windows. Only processes launched through LaunchServices (`open`) get
-a desktop session. So we launch Ghidra via a generated `.app` bundle; once it's
-running, its bridge is reachable over `127.0.0.1` from any shell — including an
-automation agent's.
-
-### Launch
-
-```sh
-agentic-gui/open-ghidra-gui.sh      # opens Ghidra in the desktop session
-# bridge comes up on http://127.0.0.1:18217 (set GUI_BRIDGE_PORT to change)
-```
-
-Under the hood `run-ghidra-agentic.sh` injects the bridge as a `-javaagent` via
-the distribution's `support/launch.properties` (`VMARGS`), so it loads only into
-the Ghidra app JVM.
-
-### Drive it
-
-`agentic-gui/ghidra-gui` wraps the HTTP API:
-
-```sh
-ghidra-gui health                 # bridge up? AWT showing? how many windows?
-ghidra-gui windows                # list top-level windows
-ghidra-gui tree [WINDOW_INDEX]    # Swing component tree: class/name/text/bounds
-ghidra-gui find "I Agree"        # locate components by text (and/or class)
-ghidra-gui shot out.png window=4  # render a window/component to PNG
-
-# In-JVM actions — NO macOS permissions required:
-ghidra-gui invoke id=6            # Swing doClick / dispatch a click
-ghidra-gui invoke text="I Agree"
-ghidra-gui invoke id=9 x=40 y=12 clicks=2   # double-click a point *inside* a component
-ghidra-gui invoke id=6 async=true           # don't block if the click opens a modal dialog
-ghidra-gui settext id=7 "main"   # set a text field
-ghidra-gui focus id=7
-
-# Drive Ghidra's own UI — NO macOS permissions required:
-ghidra-gui menu "File>Configure..."          # walk the in-frame menu bar and fire an item
-ghidra-gui gaction "Load SARIF file"         # invoke a Ghidra DockingAction by name
-ghidra-gui raise                             # bring the main window to the front
-
-# Robot actions — realistic OS input; needs Accessibility/Screen Recording:
-ghidra-gui click id=6
-ghidra-gui typetext "main"
-ghidra-gui press "ctrl shift E"
-```
-
-### Why two action layers?
+## Two action layers, and when to reach for each
 
 - **In-JVM** (`/tree`, `/find`, `/invoke`, `/settext`, `/focus`, and `/shot`
   rendered via `Component.printAll`) dispatches events *inside* the JVM and
-  renders components directly. It needs **no** macOS Accessibility or Screen
-  Recording permission, so it works reliably in headless-ish CI-like contexts.
+  renders components directly. It addresses things by id, text or tooltip
+  instead of by pixel, so it never races the window manager and never breaks
+  when a panel moves. Prefer it for deterministic automation.
 - **Robot** (`/click`, `/type`, `/key`, `/screenshot?robot=true`) generates real
-  OS-level input and captures the actual screen — most faithful to a human, but
-  subject to macOS TCC permissions.
+  OS-level input and captures the actual screen. Reach for it when you
+  specifically need the real event path.
 
-Prefer the in-JVM layer for deterministic automation; reach for Robot when you
-specifically need real input or a true screen capture.
+Alongside both there is `gui` — the container's X11 layer (`ghidra-box shot`,
+`ghidra-box click`, `ghidra-box gui …`). It sees things no JVM-side layer can:
+native popup menus, drag feedback, tooltips, and anything drawn by another
+process. The practical rule is **find with the bridge, act with whichever fits**,
+and screenshot after every step — that is the only thing that tells you the UI
+actually went where you thought.
 
-### Driving Ghidra's docking framework (beyond plain Swing)
+## Driving Ghidra's docking framework (beyond plain Swing)
 
 Clicking raw Swing components is enough for dialogs and license screens, but it
 falls down on Ghidra's own UI. Three problems came up driving the taint/SARIF
@@ -135,27 +101,27 @@ workflow end-to-end, each of which needed a dedicated capability:
 
 - **A click that opens a modal dialog deadlocks a single-threaded server.** The
   modal event loop blocks the EDT, so an `invokeAndWait` from the HTTP handler
-  never returns. The bridge now uses a **cached thread pool** executor, and
+  never returns. The bridge uses a **cached thread pool** executor, and
   `/invoke` takes an **`async`** flag (dispatch via `invokeLater`, return
   immediately) so opening a dialog doesn't wedge the bridge.
 
 Two smaller additions support the above: `/invoke` accepts component-local
 **`x`/`y`** plus a **`clicks`** count (double-clicking a tree node or ticking a
-table checkbox without OS-level Robot input), and `/find` / `/tree` now expose
+table checkbox without OS-level Robot input), and `/find` / `/tree` expose
 each component's **tooltip** — Ghidra's toolbar buttons are icon-only with no text
 or accessible name, so the tooltip is often the only way to identify them.
 
-### Example: a scripted smoke test
+## Example: a scripted smoke test
 
 ```sh
-export GUI_BRIDGE_PORT=18217
-agentic-gui/ghidra-gui invoke text="I Agree"     # accept the license
-agentic-gui/ghidra-gui invoke text="Close"       # dismiss Tip of the Day
-agentic-gui/ghidra-gui windows | jq '.[] | select(.title|startswith("Ghidra"))'
-agentic-gui/ghidra-gui shot ghidra_main.png window=4
+ghidra-box ghidra start
+ghidra-box bridge invoke text="I Agree"     # accept the license
+ghidra-box bridge invoke text="Close"       # dismiss Tip of the Day
+ghidra-box gui wait-window 'NO ACTIVE PROJECT' 120
+ghidra-box shot ghidra_main                 # -> agentic-box/state/shots/ghidra_main.png
 ```
 
-### HTTP endpoints (for building your own driver / MCP tool)
+## HTTP endpoints (for building your own driver / MCP tool)
 
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
@@ -178,12 +144,37 @@ Components are addressed by stable integer `id`s assigned during tree/find walks
 `/tree` and `/find` also report each component's `tooltip`, which is often the
 only label on Ghidra's icon-only toolbar buttons.
 
-### Building just the agent
+The agent binds `127.0.0.1` on purpose. The container's entrypoint runs a small
+forwarder (`agentic-box/bin/box-portfwd`) so the published host port reaches it
+without the bridge itself having to listen on a routable address.
+
+## Building just the agent
+
+`ghidra-box ghidra start` builds it automatically when it is missing. To do it
+by hand:
 
 ```sh
-nix-shell --run agentic-gui/build-agent.sh
+ghidra-box exec /work/ghidra/agentic-gui/build-agent.sh
 # -> agentic-gui/build/ghidra-gui-bridge.jar
 ```
 
 The agent is pure JDK (no third-party deps), so it compiles with a plain `javac`
 and loads cleanly under Ghidra's custom class loader.
+
+---
+
+## Building Ghidra itself
+
+In the container, which is where this branch expects you to build:
+
+```sh
+ghidra-box ghidra-build            # fetchDependencies + assembleAll
+ghidra-box ghidra-build :DecompilerDependent:test
+```
+
+The host-side Nix build still works if you want it — `nix-shell --run
+./build-ghidra.sh` for an iterative build into `build/dist/`, or `nix-build` for
+a proper derivation via `default.nix`. Both are pinned to the nixpkgs revision
+whose `ghidra` is exactly 12.1.2, matching `Ghidra/application.properties`. The
+container's toolchain shares that pin, so the JDK and Gradle are the same
+derivations either way.
